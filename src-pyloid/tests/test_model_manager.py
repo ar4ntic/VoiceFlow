@@ -496,3 +496,60 @@ class TestProgressBarSelfReporting:
         # tqdm's self.n may stay at 0 because disabled, but our counter must work
         assert bar._vf_n == 400, \
             f"expected our counter to track bytes, got {bar._vf_n}"
+
+
+class TestDeleteModel:
+    """Tests for single-model deletion.
+
+    delete_model deletes only the HuggingFace cache folder for one model,
+    leaving every other model untouched (unlike clear_cache which wipes all).
+    HOME is redirected to a tmp dir so we never touch the real cache.
+    """
+
+    def _make_cached(self, home: Path, model_name: str, size: int = 4096) -> Path:
+        """Create a fake HF cache folder for a model with one file of `size`."""
+        from services.model_manager import MODEL_REPOS
+        folder = "models--" + MODEL_REPOS[model_name].replace("/", "--")
+        path = home / ".cache" / "huggingface" / "hub" / folder
+        (path / "snapshots").mkdir(parents=True)
+        (path / "snapshots" / "model.bin").write_bytes(b"x" * size)
+        return path
+
+    def test_delete_removes_only_target_model(self, tmp_path, monkeypatch):
+        from services.model_manager import ModelManager
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        base_path = self._make_cached(tmp_path, "base", size=4096)
+        small_path = self._make_cached(tmp_path, "small", size=8192)
+
+        result = ModelManager().delete_model("base")
+
+        assert result["success"] is True
+        assert result["deleted_model"] == "base"
+        assert result["deleted_bytes"] == 4096
+        assert result["error"] is None
+        assert not base_path.exists()
+        # The other model must survive.
+        assert small_path.exists()
+
+    def test_delete_is_idempotent_when_not_cached(self, tmp_path, monkeypatch):
+        from services.model_manager import ModelManager
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        result = ModelManager().delete_model("base")
+
+        assert result["success"] is True
+        assert result["deleted_bytes"] == 0
+        assert result["deleted_model"] is None
+
+    def test_delete_unknown_model_fails(self, tmp_path, monkeypatch):
+        from services.model_manager import ModelManager
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        result = ModelManager().delete_model("bogus-model-xyz")
+
+        assert result["success"] is False
+        assert result["error"] == "unknown model"
+        assert result["deleted_model"] is None

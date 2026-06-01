@@ -615,6 +615,65 @@ class ModelManager:
                 "error": str(e)
             }
 
+    def delete_model(self, model_name: str) -> dict:
+        """
+        Delete a single cached Whisper model from the HuggingFace cache directory.
+
+        Returns:
+            dict with:
+                - success: bool indicating if operation succeeded
+                - deleted_bytes: total bytes freed
+                - deleted_model: name of the model deleted, or None
+                - error: error message if failed
+        """
+        import shutil
+
+        repo_id = MODEL_REPOS.get(model_name)
+        if repo_id is None:
+            log.error("Refusing to delete unknown model", model=model_name)
+            return {
+                "success": False,
+                "deleted_bytes": 0,
+                "deleted_model": None,
+                "error": "unknown model",
+            }
+
+        log.info("Deleting model", model=model_name)
+
+        try:
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            cache_folder_name = f"models--{repo_id.replace('/', '--')}"
+            model_cache_path = cache_dir / cache_folder_name
+
+            if not model_cache_path.exists():
+                log.info("Model not cached, nothing to delete", model=model_name)
+                return {
+                    "success": True,
+                    "deleted_bytes": 0,
+                    "deleted_model": None,
+                    "error": None,
+                }
+
+            size = sum(f.stat().st_size for f in model_cache_path.rglob("*") if f.is_file())
+            log.info("Deleting model cache", model=model_name, path=str(model_cache_path), size_bytes=size)
+            shutil.rmtree(model_cache_path)
+
+            return {
+                "success": True,
+                "deleted_bytes": size,
+                "deleted_model": model_name,
+                "error": None,
+            }
+
+        except Exception as e:
+            log.error("Failed to delete model", model=model_name, error=str(e))
+            return {
+                "success": False,
+                "deleted_bytes": 0,
+                "deleted_model": None,
+                "error": str(e),
+            }
+
 
 # Singleton instance
 _model_manager: Optional[ModelManager] = None

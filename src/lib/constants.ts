@@ -1,7 +1,7 @@
 
 import { Lock, Gauge, Wand2 } from "lucide-react";
 
-export const APP_VERSION = "1.6.0";
+export const APP_VERSION = "1.6.1";
 
 export const THEME_OPTIONS = [
   { val: 'light', label: 'Light' },

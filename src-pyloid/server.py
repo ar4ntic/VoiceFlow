@@ -558,6 +558,13 @@ async def clear_model_cache():
     return result
 
 
+@server.method()
+async def delete_model(model_name: str):
+    """Delete a single cached Whisper model from the cache directory."""
+    manager = get_model_manager()
+    return manager.delete_model(model_name)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Meetings feature — recordings + LLM config
 # Thin wrappers over AppController.meetings (MeetingsController).

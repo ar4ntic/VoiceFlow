@@ -128,6 +128,10 @@ export const api = {
     return rpc.call("clear_model_cache");
   },
 
+  async deleteModel(modelName: string): Promise<{ success: boolean; deleted_bytes: number; deleted_model: string | null; error: string | null }> {
+    return rpc.call("delete_model", { model_name: modelName });
+  },
+
   async getModelCacheDir(): Promise<{ path: string }> {
     return rpc.call("get_model_cache_dir");
   },

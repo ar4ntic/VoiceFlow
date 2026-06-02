@@ -92,6 +92,13 @@ function formatModelSize(mb: number): string {
   return `${(mb / 1024).toFixed(1)} GB`;
 }
 
+function formatBytes(bytes: number): string {
+  if (!bytes) return "0 MB";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1000) return `${mb.toFixed(0)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
 function shortenGpuName(name: string): string {
   return name.replace("NVIDIA ", "").replace(" Laptop GPU", "");
 }
@@ -147,28 +154,24 @@ export function SettingsTab() {
       .catch(() => setModelCacheDir(null));
   }, []);
 
-  useEffect(() => {
+  const refreshModelStatus = useCallback(async () => {
     if (!options) return;
-    let cancelled = false;
-    const fetchAll = async () => {
-      const results = await Promise.all(
-        options.models.map(async (m) => {
-          try {
-            const info = await api.getModelInfo(m);
-            return [m, info.cached] as const;
-          } catch {
-            return [m, false] as const;
-          }
-        })
-      );
-      if (cancelled) return;
-      setModelStatus(Object.fromEntries(results));
-    };
-    fetchAll();
-    return () => {
-      cancelled = true;
-    };
+    const results = await Promise.all(
+      options.models.map(async (m) => {
+        try {
+          const info = await api.getModelInfo(m);
+          return [m, info.cached] as const;
+        } catch {
+          return [m, false] as const;
+        }
+      })
+    );
+    setModelStatus(Object.fromEntries(results));
   }, [options]);
+
+  useEffect(() => {
+    refreshModelStatus();
+  }, [refreshModelStatus]);
 
   const updateSetting = useCallback(
     async <K extends keyof Settings>(key: K, value: Settings[K]) => {
@@ -224,6 +227,23 @@ export function SettingsTab() {
   const handleDownloadCancel = useCallback(() => {
     setDownloadModalOpen(false);
     setPendingModel(null);
+  }, []);
+
+  const handleDeleteModel = useCallback(async (model: string) => {
+    // Active model is guarded in the UI; this is belt-and-suspenders.
+    if (model === settingsRef.current?.model) return;
+    try {
+      const res = await api.deleteModel(model);
+      if (res.success) {
+        setModelStatus((prev) => ({ ...prev, [model]: false }));
+        toast.success(`Deleted ${model} — freed ${formatBytes(res.deleted_bytes)}`);
+      } else {
+        toast.error(res.error ?? "Failed to delete model");
+      }
+    } catch (err) {
+      console.error("Failed to delete model:", err);
+      toast.error("Failed to delete model");
+    }
   }, []);
 
   const validateHotkey = useCallback(
@@ -312,6 +332,7 @@ export function SettingsTab() {
               currentModel={settings.model}
               statuses={modelStatus}
               onChange={handleModelChange}
+              onDelete={handleDeleteModel}
             />
           </SectionBlock>
 
@@ -463,7 +484,7 @@ export function SettingsTab() {
           tone="danger"
           description="Wipe local state and start over. None of this can be undone."
         >
-          <DangerZone />
+          <DangerZone onModelsCleared={refreshModelStatus} />
         </Section>
 
         <footer className="pt-8 border-t border-border flex items-center justify-between font-mono text-[11px] text-cream-muted/60">
@@ -722,11 +743,13 @@ function ModelPicker({
   currentModel,
   statuses,
   onChange,
+  onDelete,
 }: {
   models: string[];
   currentModel: string;
   statuses: Record<string, boolean>;
   onChange: (m: string) => void;
+  onDelete: (m: string) => void;
 }) {
   return (
     <div className="border border-border rounded-md overflow-hidden bg-surface">
@@ -736,18 +759,14 @@ function ModelPicker({
         const isActive = model === currentModel;
         const cacheState =
           cached === undefined ? "unknown" : cached ? "cached" : "absent";
+        const canDelete = cacheState === "cached" && !isActive;
         return (
-          <button
+          <div
             key={model}
-            type="button"
-            onClick={() => onChange(model)}
-            aria-pressed={isActive}
             className={cn(
-              "w-full text-left transition-colors flex items-stretch group",
+              "transition-colors flex items-stretch group",
               i > 0 && "border-t border-border",
-              isActive
-                ? "bg-accent-500/[0.04] hover:bg-accent-500/[0.06]"
-                : "hover:bg-secondary/40"
+              isActive ? "bg-accent-500/[0.04]" : "hover:bg-secondary/40"
             )}
           >
             <div
@@ -757,7 +776,12 @@ function ModelPicker({
               )}
               aria-hidden
             />
-            <div className="flex-1 flex items-center gap-4 px-5 py-4 min-w-0">
+            <button
+              type="button"
+              onClick={() => onChange(model)}
+              aria-pressed={isActive}
+              className="flex-1 text-left flex items-center gap-4 pl-5 pr-3 py-4 min-w-0"
+            >
               <ModelStatusDot active={isActive} cached={cacheState} />
               <div className="flex-1 min-w-0">
                 <div className="flex items-baseline gap-3 flex-wrap">
@@ -785,11 +809,55 @@ function ModelPicker({
                 <DotMeter label="speed" value={meta.speed} />
                 <DotMeter label="accuracy" value={meta.accuracy} />
               </div>
-            </div>
-          </button>
+            </button>
+            {canDelete && <ModelDeleteButton model={model} onDelete={onDelete} />}
+          </div>
         );
       })}
     </div>
+  );
+}
+
+function ModelDeleteButton({
+  model,
+  onDelete,
+}: {
+  model: string;
+  onDelete: (m: string) => void;
+}) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <button
+          type="button"
+          className="flex-shrink-0 self-stretch px-4 flex items-center text-cream-muted/40 hover:text-destructive hover:bg-destructive/[0.06] transition-colors"
+          aria-label={`Delete ${model}`}
+          title={`Delete ${model} from disk`}
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle className="font-display">
+            Delete {model}?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            Removes the downloaded model from disk to free up space. You can
+            re-download it anytime by selecting it again.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => onDelete(model)}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -1197,7 +1265,7 @@ function PathRow({
   );
 }
 
-function DangerZone() {
+function DangerZone({ onModelsCleared }: { onModelsCleared: () => void }) {
   const [deleteAppData, setDeleteAppData] = useState(true);
   const [deleteModels, setDeleteModels] = useState(false);
   const [deleteCudaLibs, setDeleteCudaLibs] = useState(false);
@@ -1217,11 +1285,18 @@ function DangerZone() {
       const message =
         parts.length > 0 ? `Deleted: ${parts.join(", ")}` : "Nothing deleted";
 
-      toast.success(`${message} — returning to setup`);
-      setTimeout(() => {
-        window.location.hash = "/onboarding";
-        window.location.reload();
-      }, 500);
+      // Resetting app data wipes settings/onboarding, so we must return to
+      // setup. Deleting only models/CUDA leaves the app usable — stay put.
+      if (deleteAppData) {
+        toast.success(`${message} — returning to setup`);
+        setTimeout(() => {
+          window.location.hash = "/onboarding";
+          window.location.reload();
+        }, 500);
+      } else {
+        toast.success(message);
+        if (deleteModels) onModelsCleared();
+      }
     } catch (err) {
       console.error("Failed to delete data:", err);
       toast.error("Failed to delete data");

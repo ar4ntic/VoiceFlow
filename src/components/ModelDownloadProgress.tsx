@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Download, X, Check, AlertCircle, Loader2, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
+import { useBackendEvent } from "@/hooks/useBackendEvent";
 import type { DownloadProgress, DownloadComplete } from "@/lib/types";
 
 // HuggingFace URLs for manual download
@@ -66,41 +67,21 @@ export function ModelDownloadProgress({
   const [error, setError] = useState<string | null>(null);
   const hasStarted = useRef(false);
 
-  // Handle download progress events
-  const handleProgress = useCallback((e: CustomEvent<DownloadProgress>) => {
-    setProgress(e.detail);
-  }, []);
+  useBackendEvent<DownloadProgress>("download-progress", setProgress);
 
-  // Handle download complete events
-  const handleCompleteEvent = useCallback(
-    (e: CustomEvent<DownloadComplete>) => {
-      const result = e.detail;
-
-      if (result.success) {
-        setState("completed");
-        onComplete(true);
-      } else if (result.cancelled) {
-        setState("cancelled");
-        onCancel?.();
-      } else {
-        setState("error");
-        setError(result.error || "Download failed");
-        onComplete(false);
-      }
-    },
-    [onComplete, onCancel]
-  );
-
-  // Set up event listeners
-  useEffect(() => {
-    document.addEventListener("download-progress", handleProgress as EventListener);
-    document.addEventListener("download-complete", handleCompleteEvent as EventListener);
-
-    return () => {
-      document.removeEventListener("download-progress", handleProgress as EventListener);
-      document.removeEventListener("download-complete", handleCompleteEvent as EventListener);
-    };
-  }, [handleProgress, handleCompleteEvent]);
+  useBackendEvent<DownloadComplete>("download-complete", (result) => {
+    if (result.success) {
+      setState("completed");
+      onComplete(true);
+    } else if (result.cancelled) {
+      setState("cancelled");
+      onCancel?.();
+    } else {
+      setState("error");
+      setError(result.error || "Download failed");
+      onComplete(false);
+    }
+  });
 
   // Auto-start download
   useEffect(() => {

@@ -1,6 +1,7 @@
 import { useEffect, useState, useLayoutEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "@/lib/api";
+import { useBackendEvent } from "@/hooks/useBackendEvent";
 
 type PopupState =
   | "idle"
@@ -106,25 +107,17 @@ export function Popup() {
     };
   }, []);
 
-  useEffect(() => {
-    const handleAmplitude = (e: CustomEvent<number>) => setAmplitude(e.detail);
-    const handleState = (e: CustomEvent<{ state: PopupState; durationMs?: number }>) => {
-      const next = e.detail.state;
-      setState(next);
-      if (typeof e.detail.durationMs === "number") {
-        meetingBaseRef.current = { at: Date.now(), dur: e.detail.durationMs };
-        setMeetingDurationMs(e.detail.durationMs);
+  useBackendEvent<number>("amplitude", setAmplitude);
+  useBackendEvent<{ state: PopupState; durationMs?: number }>(
+    "popup-state",
+    (detail) => {
+      setState(detail.state);
+      if (typeof detail.durationMs === "number") {
+        meetingBaseRef.current = { at: Date.now(), dur: detail.durationMs };
+        setMeetingDurationMs(detail.durationMs);
       }
-    };
-
-    document.addEventListener("amplitude", handleAmplitude as EventListener);
-    document.addEventListener("popup-state", handleState as EventListener);
-
-    return () => {
-      document.removeEventListener("amplitude", handleAmplitude as EventListener);
-      document.removeEventListener("popup-state", handleState as EventListener);
-    };
-  }, []);
+    }
+  );
 
   // Client-side meeting duration ticker. Runs only while actively recording
   // (paused → frozen at whatever the backend last reported). Resyncs whenever

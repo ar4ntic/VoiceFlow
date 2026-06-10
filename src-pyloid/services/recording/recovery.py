@@ -38,7 +38,8 @@ def recover_unfinished_recordings(
     `on_recovered` callback is invoked for each — used by AppController to
     enqueue background transcription."""
     recovered: list[int] = []
-    rows = db.list_unfinished_recordings()
+    repo = db.recordings  # Recording persistence — RecordingsRepository
+    rows = repo.list_unfinished_recordings()
     if not rows:
         return recovered
 
@@ -47,10 +48,10 @@ def recover_unfinished_recordings(
         relpath = row.get("audio_relpath")
 
         if not relpath:
-            db.update_transcript_status(
+            repo.update_transcript_status(
                 rid, status="error", error="recorder crashed before audio file was created"
             )
-            db.set_recording_recorder_state(rid, None)
+            repo.set_recording_recorder_state(rid, None)
             log.warning("recovery: no audio file recorded", recording_id=rid)
             continue
 
@@ -58,16 +59,16 @@ def recover_unfinished_recordings(
         try:
             wav_path.relative_to(data_root.resolve())
         except ValueError:
-            db.update_transcript_status(rid, status="error", error="audio path outside data root")
-            db.set_recording_recorder_state(rid, None)
+            repo.update_transcript_status(rid, status="error", error="audio path outside data root")
+            repo.set_recording_recorder_state(rid, None)
             log.warning("recovery: refused path traversal", recording_id=rid, path=str(wav_path))
             continue
 
         if not wav_path.exists():
-            db.update_transcript_status(
+            repo.update_transcript_status(
                 rid, status="error", error=f"audio file missing on disk: {relpath}"
             )
-            db.set_recording_recorder_state(rid, None)
+            repo.set_recording_recorder_state(rid, None)
             log.warning("recovery: audio missing", recording_id=rid, path=str(wav_path))
             continue
 
@@ -79,12 +80,12 @@ def recover_unfinished_recordings(
             duration_ms = int(frames * 1000 / sample_rate) if sample_rate else 0
             size_bytes = wav_path.stat().st_size
         except Exception as exc:
-            db.update_transcript_status(rid, status="error", error=f"audio unreadable: {exc}")
-            db.set_recording_recorder_state(rid, None)
+            repo.update_transcript_status(rid, status="error", error=f"audio unreadable: {exc}")
+            repo.set_recording_recorder_state(rid, None)
             log.warning("recovery: audio unreadable", recording_id=rid, error=str(exc))
             continue
 
-        db.set_recording_audio(
+        repo.set_recording_audio(
             rid,
             audio_relpath=relpath,
             duration_ms=duration_ms,
@@ -92,8 +93,8 @@ def recover_unfinished_recordings(
             sample_rate=sample_rate,
             channels=channels,
         )
-        db.update_transcript_status(rid, status="pending", progress=0)
-        db.set_recording_recorder_state(rid, None)
+        repo.update_transcript_status(rid, status="pending", progress=0)
+        repo.set_recording_recorder_state(rid, None)
         log.info(
             "recovery: recording recovered",
             recording_id=rid, duration_ms=duration_ms, channels=channels,

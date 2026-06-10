@@ -28,62 +28,12 @@ if sys.platform.startswith('linux'):
     except Exception:
         pass  # Best-effort, don't crash on failure
 
-    # Imported lazily because services/* depends on env that we still need to
-    # configure below; keep the import inside the linux block so non-linux
-    # platforms don't pay the cost.
-    from services.process_env import system_env as _system_env_for_hyprctl
-
-    def _setup_hyprland_window_rules():
-        """Set Hyprland window rules for the popup overlay if running under Hyprland.
-
-        On Wayland, Qt clients cannot position their own toplevels — `set_position()`
-        is a silent no-op. We therefore rely on the compositor to place and pin the
-        popup. These rules use `windowrulev2` with the correct matcher syntax
-        `title:^(Recording)$`. The previous `windowrule "...,match:title Recording"`
-        form was silently rejected by hyprctl (no `match:` keyword exists), which
-        is why the popup spawned in the middle of the screen on production builds
-        even though the Python coordinate math was correct.
-
-        TODO(wayland-other-compositors): KDE and GNOME need wlr-layer-shell or
-        equivalent to dock a window — there's no portable Wayland positioning API.
-        Only Hyprland is handled here for now (the rest of the userbase is X11/win/mac).
-        """
-        if not os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
-            return
-        import subprocess
-        # `move 50%-w/2 100%-h-100` puts the popup horizontally centered and
-        # 100 px above the bottom of the active monitor (matches the original
-        # Python intent at main.py: popup_y = _screen_y + _screen_height - 100).
-        rules = [
-            "float,title:^(Recording)$",
-            "pin,title:^(Recording)$",
-            "noinitialfocus,title:^(Recording)$",
-            "nofocus,title:^(Recording)$",
-            "noborder,title:^(Recording)$",
-            "noshadow,title:^(Recording)$",
-            "noblur,title:^(Recording)$",
-            "rounding 0,title:^(Recording)$",
-            "opacity 1.0 override 1.0 override,title:^(Recording)$",
-            "move onscreen 50%-w/2 100%-h-100,title:^(Recording)$",
-        ]
-        # Strip PyInstaller LD_LIBRARY_PATH/LD_PRELOAD before spawning
-        # hyprctl — without this, the AppImage's bundled libstdc++ shadows
-        # the system one and hyprctl fails with `GLIBCXX_3.4.32 not found`.
-        env = _system_env_for_hyprctl()
-        for rule in rules:
-            try:
-                result = subprocess.run(
-                    ['hyprctl', 'keyword', 'windowrulev2', rule],
-                    capture_output=True, timeout=2, text=True, env=env,
-                )
-                if result.returncode != 0:
-                    print(f"[WARN] hyprctl rejected rule {rule!r}: {result.stderr.strip() or result.stdout.strip()}",
-                          flush=True)
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                break
+    # Compositor integration lives in services/hyprland.py (import-light by
+    # design — safe in this pre-Qt early-boot block).
+    from services import hyprland as _hyprland
 
     try:
-        _setup_hyprland_window_rules()
+        _hyprland.setup_popup_window_rules()
     except Exception:
         pass
 
@@ -183,28 +133,19 @@ log = get_logger("window")
 
 
 # ============================================================================
-# Thread-safe signal emitter for cross-thread UI updates
+# Thread-safe event bridge for cross-thread UI updates — see
+# services/ui_event_bridge.py for the contract.
 # ============================================================================
-class ThreadSafeSignals(QObject):
-    """Emits signals that can be connected to slots running on the main thread."""
-    recording_started = Signal()
-    recording_stopped = Signal()
-    transcription_complete = Signal(str)
-    amplitude_changed = Signal(float)
-    # Meeting recorder state changes — payload is {state, durationMs}.
-    # Routed to the popup window so the user sees a "MEETING" indicator
-    # whenever the long-form recorder is active, distinct from PTT.
-    meeting_state_changed = Signal(dict)
+from services.ui_event_bridge import UiEventBridge
 
-
-# Global signal emitter instance (created after QApplication)
-_signals: ThreadSafeSignals = None
+# Global bridge instance (created after QApplication)
+_bridge: UiEventBridge = None
 
 
 def init_signals():
-    """Initialize the signal emitter - must be called after QApplication is created."""
-    global _signals
-    _signals = ThreadSafeSignals()
+    """Initialize the event bridge - must be called after QApplication is created."""
+    global _bridge
+    _bridge = UiEventBridge()
 
 
 # ============================================================================
@@ -382,36 +323,7 @@ _screen_width = 1920
 _screen_height = 1080
 
 
-def _is_hyprland() -> bool:
-    return bool(os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'))
-
-
-def _hypr_dispatch(*args: str) -> None:
-    """Run `hyprctl dispatch ...`; no-op if not on Hyprland or hyprctl missing.
-
-    Used at runtime to move/resize the floating popup whenever it changes
-    state (idle ↔ active), since Qt's `set_position()` is silently dropped on
-    Wayland — the compositor is the only authority on window placement.
-
-    Subprocess env is scrubbed via services.process_env.system_env() so the
-    AppImage's bundled libstdc++ doesn't shadow the system one and break
-    hyprctl with `GLIBCXX_3.4.32 not found` symbol errors.
-    """
-    if not _is_hyprland():
-        return
-    import subprocess
-    from services.process_env import system_env
-    try:
-        result = subprocess.run(
-            ['hyprctl', 'dispatch', *args],
-            capture_output=True, timeout=2, text=True, env=system_env(),
-        )
-        if result.returncode != 0:
-            log.warning("hyprctl dispatch failed",
-                        args=list(args),
-                        stderr=(result.stderr or '').strip())
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        log.warning("hyprctl dispatch error", error=str(e))
+from services.hyprland import dispatch as _hypr_dispatch
 
 
 def get_active_monitor_info():
@@ -486,7 +398,7 @@ def resize_popup(width: int, height: int):
 
         # Wayland fallback: ask the compositor to re-dock the existing window.
         # `set_position()` and `set_size()` above are no-ops on Wayland for
-        # toplevels — the windowrulev2 from _setup_hyprland_window_rules() only
+        # toplevels — the windowrulev2 from hyprland.setup_popup_window_rules() only
         # fires on initial map, so we have to dispatch the move/resize here too.
         _hypr_dispatch('resizewindowpixel', f'exact {width} {height},title:^(Recording)$')
         _hypr_dispatch('movewindowpixel', f'exact {popup_x} {popup_y},title:^(Recording)$')
@@ -598,9 +510,9 @@ def _on_recording_start_slot():
     send_popup_event('popup-state', {'state': 'recording'})
 
 def on_recording_start():
-    """Called from hotkey thread - emits signal to main Qt thread."""
-    if _signals:
-        _signals.recording_started.emit()
+    """Called from hotkey thread - routes to main Qt thread via the bridge."""
+    if _bridge:
+        _bridge.emit_event("ptt-recording-start")
 
 def _on_recording_stop_slot():
     """Slot: Actual recording stop handler - runs on main thread via signal."""
@@ -609,9 +521,9 @@ def _on_recording_stop_slot():
     send_popup_event('popup-state', {'state': 'processing'})
 
 def on_recording_stop():
-    """Called from hotkey thread - emits signal to main Qt thread."""
-    if _signals:
-        _signals.recording_stopped.emit()
+    """Called from hotkey thread - routes to main Qt thread via the bridge."""
+    if _bridge:
+        _bridge.emit_event("ptt-recording-stop")
 
 
 def _on_meeting_state_slot(payload):
@@ -666,12 +578,6 @@ def _maybe_log_meeting_state(state: str, duration_ms: int) -> None:
     log.info("Meeting state", state=state, duration_ms=duration_ms)
 
 
-def on_meeting_state(name, payload):
-    """Called from MeetingsController's event_emitter on a background thread.
-    Filters to meeting-state events and hands off to the main Qt thread."""
-    if name != "meeting-state" or not _signals:
-        return
-    _signals.meeting_state_changed.emit(payload or {})
 
 def _on_transcription_complete_slot(text: str):
     """Slot: Actual transcription complete handler - runs on main thread via signal."""
@@ -681,9 +587,9 @@ def _on_transcription_complete_slot(text: str):
     send_popup_event('popup-state', {'state': 'idle'})
 
 def on_transcription_complete(text: str):
-    """Called from transcription thread - emits signal to main Qt thread."""
-    if _signals:
-        _signals.transcription_complete.emit(text)
+    """Called from transcription thread - routes to main Qt thread via the bridge."""
+    if _bridge:
+        _bridge.emit_event("ptt-transcription-complete", text)
 
 def send_main_window_event(name, detail):
     """Send event to main window using Pyloid's invoke method."""
@@ -702,9 +608,9 @@ def _on_amplitude_slot(amp: float):
     send_main_window_event('amplitude', amp)
 
 def on_amplitude(amp: float):
-    """Called from audio thread - emits signal to main Qt thread."""
-    if _signals:
-        _signals.amplitude_changed.emit(amp)
+    """Called from audio thread - routes to main Qt thread via the bridge."""
+    if _bridge:
+        _bridge.emit_event("ptt-amplitude", amp)
 
 
 def on_onboarding_complete():
@@ -776,13 +682,17 @@ register_data_reset_callback(on_data_reset)
 register_download_progress_callback(send_download_progress)
 register_popup_visibility_callback(on_popup_visibility_changed)
 
-# Connect thread-safe signals to their slot handlers
-# Qt.QueuedConnection ensures slots run on the main thread
-_signals.recording_started.connect(_on_recording_start_slot, Qt.QueuedConnection)
-_signals.recording_stopped.connect(_on_recording_stop_slot, Qt.QueuedConnection)
-_signals.transcription_complete.connect(_on_transcription_complete_slot, Qt.QueuedConnection)
-_signals.amplitude_changed.connect(_on_amplitude_slot, Qt.QueuedConnection)
-_signals.meeting_state_changed.connect(_on_meeting_state_slot, Qt.QueuedConnection)
+# Register main-thread handlers on the bridge (QueuedConnection inside the
+# bridge guarantees these run on the Qt main thread).
+_bridge.on("ptt-recording-start", lambda _payload: _on_recording_start_slot())
+_bridge.on("ptt-recording-stop", lambda _payload: _on_recording_stop_slot())
+_bridge.on("ptt-transcription-complete", _on_transcription_complete_slot)
+_bridge.on("ptt-amplitude", _on_amplitude_slot)
+# Meeting recorder state — drives the popup's "MEETING" pill. Other meetings
+# events (transcribe/summarize progress) have no popup handler and are
+# dropped by the bridge; the dashboard gets meeting state via its own poll
+# and push paths.
+_bridge.on("meeting-state", lambda payload: _on_meeting_state_slot(payload or {}))
 
 # Set UI callbacks
 controller.set_ui_callbacks(
@@ -792,8 +702,11 @@ controller.set_ui_callbacks(
     on_amplitude=on_amplitude,
 )
 
-# Route meeting recorder events to the popup (meeting-state pill).
-controller.set_meetings_event_emitter(on_meeting_state)
+# Route ALL meeting recorder events through the bridge; only handled names
+# reach the UI.
+controller.set_meetings_event_emitter(
+    lambda name, payload: _bridge.emit_event(name, payload) if _bridge else None
+)
 
 # Initialize controller (load model, start hotkey listener)
 print("[DEBUG] Initializing controller...", flush=True)

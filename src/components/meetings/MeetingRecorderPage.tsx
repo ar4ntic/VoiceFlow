@@ -7,7 +7,7 @@
    Layout matches the rest of the app: standard page shell + `SettingRow`-style
    form rows so the visual rhythm tracks Settings. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Mic, Monitor, Pause, Play, Square } from "lucide-react";
 import { toast } from "sonner";
@@ -25,6 +25,7 @@ import type { AudioSource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { LevelMeter } from "./LevelMeter";
 import { useMeetingRecorder } from "./MeetingRecorderContext";
+import { useAudioSourcePreview } from "./useAudioSourcePreview";
 import { formatDuration } from "./utils";
 
 const NONE_VALUE = "__none__";
@@ -46,9 +47,7 @@ export function MeetingRecorderPage() {
 
   // Pre-record source preview — opens the picked source(s) without recording
   // so the user can confirm levels are flowing.
-  const [previewMicDb, setPreviewMicDb] = useState<number | null>(null);
-  const [previewLoopDb, setPreviewLoopDb] = useState<number | null>(null);
-  const previewActiveKey = useRef<string>("");
+  const preview = useAudioSourcePreview(micId, loopId, isLive);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,72 +72,6 @@ export function MeetingRecorderPage() {
     };
   }, []);
 
-  // Drive the source preview from the currently-picked dropdown values.
-  useEffect(() => {
-    if (isLive) {
-      previewActiveKey.current = "";
-      return;
-    }
-    const key = `${micId || "-"}|${loopId || "-"}`;
-    if (key === "-|-") {
-      previewActiveKey.current = "";
-      api.recordingsPreviewStop().catch(() => {});
-      setPreviewMicDb(null);
-      setPreviewLoopDb(null);
-      return;
-    }
-    previewActiveKey.current = key;
-    let cancelled = false;
-    (async () => {
-      const result = await api
-        .recordingsPreviewStart(
-          micId ? Number(micId) : null,
-          loopId ? Number(loopId) : null,
-        )
-        .catch((err: unknown) => {
-          console.warn("preview start failed", err);
-          return { ok: false } as const;
-        });
-      if (cancelled || previewActiveKey.current !== key) return;
-      if (!result.ok) {
-        setPreviewMicDb(null);
-        setPreviewLoopDb(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [micId, loopId, isLive]);
-
-  useEffect(() => {
-    return () => {
-      api.recordingsPreviewStop().catch(() => {});
-    };
-  }, []);
-
-  useEffect(() => {
-    if (isLive) return;
-    const hasAny = micId !== "" || loopId !== "";
-    if (!hasAny) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const st = await api.recordingsPreviewState();
-        if (cancelled) return;
-        setPreviewMicDb(st.hasMic ? st.micPeakDb : null);
-        setPreviewLoopDb(st.hasLoopback ? st.loopbackPeakDb : null);
-      } catch {
-        /* RPC blip — keep last value. */
-      }
-    };
-    tick();
-    const id = window.setInterval(tick, 200);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [micId, loopId, isLive]);
-
   const handleStart = async () => {
     if (!micId && !loopId) {
       toast.error("Pick at least one source");
@@ -146,9 +79,7 @@ export function MeetingRecorderPage() {
     }
     setStarting(true);
     try {
-      previewActiveKey.current = "";
-      setPreviewMicDb(null);
-      setPreviewLoopDb(null);
+      preview.clear();
       await api.recordingsStart(
         title || defaultTitle(),
         micId ? Number(micId) : null,
@@ -220,8 +151,8 @@ export function MeetingRecorderPage() {
             onMic={setMicId}
             loopId={loopId}
             onLoop={setLoopId}
-            previewMicDb={previewMicDb}
-            previewLoopDb={previewLoopDb}
+            previewMicDb={preview.micPeakDb}
+            previewLoopDb={preview.loopbackPeakDb}
             onStart={handleStart}
             starting={starting}
           />

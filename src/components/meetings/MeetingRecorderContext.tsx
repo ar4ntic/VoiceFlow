@@ -29,6 +29,7 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "@/lib/api";
+import { useBackendEvent } from "@/hooks/useBackendEvent";
 import type { RecorderState, RecorderStateName } from "@/lib/types";
 
 interface RecorderContextValue {
@@ -101,22 +102,16 @@ export function MeetingRecorderProvider({ children }: { children: ReactNode }) {
   }, [applyState]);
 
   // Listen for backend push events. This is the primary state channel.
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<MeetingStateEvent>).detail;
-      if (!detail || typeof detail.state !== "string") return;
-      applyState({
-        state: detail.state,
-        recordingId: detail.recordingId ?? null,
-        durationMs: Number(detail.durationMs ?? 0),
-        micPeakDb: detail.micPeakDb ?? null,
-        loopbackPeakDb: detail.loopbackPeakDb ?? null,
-      });
-    };
-    document.addEventListener("meeting-state", handler as EventListener);
-    return () =>
-      document.removeEventListener("meeting-state", handler as EventListener);
-  }, [applyState]);
+  useBackendEvent<MeetingStateEvent>("meeting-state", (detail) => {
+    if (!detail || typeof detail.state !== "string") return;
+    applyState({
+      state: detail.state,
+      recordingId: detail.recordingId ?? null,
+      durationMs: Number(detail.durationMs ?? 0),
+      micPeakDb: detail.micPeakDb ?? null,
+      loopbackPeakDb: detail.loopbackPeakDb ?? null,
+    });
+  });
 
   // Initial probe at mount — covers two cases:
   //   - Page just loaded mid-recording (e.g. after dev-server hot-reload),

@@ -28,7 +28,7 @@ class TestSettingsService:
         assert settings.model == "tiny"
         assert settings.auto_start == True
         assert settings.retention == -1  # Forever
-        assert settings.theme == "system"
+        assert settings.theme == "dark"
         assert settings.onboarding_complete == False
 
     def test_update_language(self, settings_service):

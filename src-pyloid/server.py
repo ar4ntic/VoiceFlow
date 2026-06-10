@@ -68,41 +68,29 @@ async def update_settings(
     holdHotkeyEnabled: Optional[bool] = None,
     toggleHotkey: Optional[str] = None,
     toggleHotkeyEnabled: Optional[bool] = None,
+    prependSpace: Optional[bool] = None,
     recordingsAutoRenameTitle: Optional[bool] = None,
 ):
     controller = get_controller()
-    kwargs = {}
-    if language is not None:
-        kwargs["language"] = language
-    if model is not None:
-        kwargs["model"] = model
-    if device is not None:
-        kwargs["device"] = device
-    if autoStart is not None:
-        kwargs["autoStart"] = autoStart
-    if retention is not None:
-        kwargs["retention"] = retention
-    if theme is not None:
-        kwargs["theme"] = theme
-    if onboardingComplete is not None:
-        kwargs["onboardingComplete"] = onboardingComplete
-    if microphone is not None:
-        kwargs["microphone"] = microphone
-    if saveAudioToHistory is not None:
-        kwargs["saveAudioToHistory"] = saveAudioToHistory
-    if showPopup is not None:
-        kwargs["showPopup"] = showPopup
-    # Hotkey settings
-    if holdHotkey is not None:
-        kwargs["holdHotkey"] = holdHotkey
-    if holdHotkeyEnabled is not None:
-        kwargs["holdHotkeyEnabled"] = holdHotkeyEnabled
-    if toggleHotkey is not None:
-        kwargs["toggleHotkey"] = toggleHotkey
-    if toggleHotkeyEnabled is not None:
-        kwargs["toggleHotkeyEnabled"] = toggleHotkeyEnabled
-    if recordingsAutoRenameTitle is not None:
-        kwargs["recordingsAutoRenameTitle"] = recordingsAutoRenameTitle
+    provided = {
+        "language": language,
+        "model": model,
+        "device": device,
+        "autoStart": autoStart,
+        "retention": retention,
+        "theme": theme,
+        "onboardingComplete": onboardingComplete,
+        "microphone": microphone,
+        "saveAudioToHistory": saveAudioToHistory,
+        "showPopup": showPopup,
+        "holdHotkey": holdHotkey,
+        "holdHotkeyEnabled": holdHotkeyEnabled,
+        "toggleHotkey": toggleHotkey,
+        "toggleHotkeyEnabled": toggleHotkeyEnabled,
+        "prependSpace": prependSpace,
+        "recordingsAutoRenameTitle": recordingsAutoRenameTitle,
+    }
+    kwargs = {key: value for key, value in provided.items() if value is not None}
 
     # Check if onboarding was already complete before this update
     old_settings = controller.get_settings()

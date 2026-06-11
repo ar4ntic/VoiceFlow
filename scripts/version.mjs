@@ -40,9 +40,11 @@ const TARGETS = [
   },
   {
     // uv.lock: the virtual root package block. The version line directly
-    // follows `name = "voiceflow"`.
+    // follows `name = "voiceflow"`. The `\r?\n` tolerates CRLF checkouts —
+    // the Windows CI runner has core.autocrlf=true and no .gitattributes
+    // pins uv.lock to LF, so a bare `\n` fails to match there.
     file: "uv.lock",
-    re: /(name = "voiceflow"\nversion = ")([^"]+)(")/,
+    re: /(name = "voiceflow"\r?\nversion = ")([^"]+)(")/,
   },
 ];
 

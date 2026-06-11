@@ -2,7 +2,7 @@
 ; Creates a Windows installer from the PyInstaller --onedir output
 
 #define MyAppName "VoiceFlow"
-#define MyAppVersion "1.6.1"
+#define MyAppVersion "1.6.2"
 #define MyAppPublisher "infiniV"
 #define MyAppURL "https://get-voice-flow.vercel.app/"
 #define MyAppSupportURL "https://github.com/infiniV/VoiceFlow/issues"

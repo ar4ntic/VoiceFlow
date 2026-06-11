@@ -1,6 +1,6 @@
 [project]
 name = "VoiceFlow"
-version = "1.6.1"
+version = "1.6.2"
 readme = "README.md"
 description = "Offline voice-to-text dictation for Windows and Linux, using Whisper."
 keywords = ["voice-to-text", "dictation", "whisper", "speech-to-text", "offline", "linux", "wayland", "transcription", "stt", "faster-whisper", "privacy"]

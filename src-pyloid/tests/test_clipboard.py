@@ -1,5 +1,16 @@
+import os
+
 import pytest
 from services.clipboard import ClipboardService
+
+# These are integration tests against the real clipboard (wl-copy / X
+# selection). Headless environments (CI runners) have neither, so skip there
+# rather than fail — exercising the platform fallback logic needs a live
+# display server to mean anything.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"),
+    reason="clipboard tests need a real display server (X11 or Wayland)",
+)
 
 
 class TestClipboardService:

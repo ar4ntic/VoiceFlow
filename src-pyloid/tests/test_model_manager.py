@@ -498,6 +498,90 @@ class TestProgressBarSelfReporting:
             f"expected our counter to track bytes, got {bar._vf_n}"
 
 
+class TestDownloadSession:
+    """Tests for the single-flight background download session.
+
+    start_download/cancel_download/get_download_status own the lifecycle that
+    used to live as module globals in server.py. We patch download_model so no
+    network happens — only the session bookkeeping and event emission matter.
+    """
+
+    @pytest.fixture
+    def manager(self):
+        from services.model_manager import ModelManager
+        return ModelManager()
+
+    def test_already_cached_emits_complete_without_session(self, manager):
+        events = []
+        with patch.object(manager, "is_model_cached", return_value=True):
+            result = manager.start_download("tiny", lambda n, p: events.append((n, p)))
+
+        assert result == {"success": True, "alreadyCached": True}
+        assert events == [("download-complete", {
+            "model": "tiny", "success": True, "alreadyCached": True
+        })]
+        # No active session was created
+        assert manager.get_download_status() == {"active": False, "model": None}
+
+    def test_start_emits_progress_and_completion(self, manager):
+        from services.model_manager import DownloadProgress
+        import threading
+
+        events = []
+        done = threading.Event()
+
+        def fake_download(model_name, on_progress, token):
+            on_progress(DownloadProgress(model_name, 50.0, 5, 10, 100, 1))
+            return True
+
+        def emit(name, payload):
+            events.append((name, payload))
+            if name == "download-complete":
+                done.set()
+
+        with patch.object(manager, "is_model_cached", return_value=False), \
+             patch.object(manager, "download_model", side_effect=fake_download):
+            manager.start_download("base", emit)
+            assert done.wait(timeout=2), "download-complete never emitted"
+
+        names = [n for n, _ in events]
+        assert names == ["download-progress", "download-complete"]
+        progress = events[0][1]
+        assert progress["model"] == "base"
+        assert progress["downloadedBytes"] == 5
+        complete = events[1][1]
+        assert complete == {"model": "base", "success": True, "cancelled": False}
+
+    def test_status_reports_in_flight_progress(self, manager):
+        from services.model_manager import DownloadProgress
+        import threading
+
+        release = threading.Event()
+        saw_progress = threading.Event()
+
+        def fake_download(model_name, on_progress, token):
+            on_progress(DownloadProgress(model_name, 25.0, 250, 1000, 50, 15))
+            saw_progress.set()
+            release.wait(timeout=2)  # hold the session open
+            return True
+
+        with patch.object(manager, "is_model_cached", return_value=False), \
+             patch.object(manager, "download_model", side_effect=fake_download):
+            manager.start_download("small", lambda n, p: None)
+            assert saw_progress.wait(timeout=2)
+
+            status = manager.get_download_status()
+            assert status["active"] is True
+            assert status["model"] == "small"
+            assert status["percent"] == 25.0
+            assert status["downloadedBytes"] == 250
+
+            release.set()
+
+    def test_cancel_with_no_active_download(self, manager):
+        assert manager.cancel_download() == {"success": True, "cancelled": False}
+
+
 class TestDeleteModel:
     """Tests for single-model deletion.
 

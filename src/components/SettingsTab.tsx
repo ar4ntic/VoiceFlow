@@ -37,38 +37,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import { api } from "@/lib/api";
 import type { Settings, Options, GpuInfo } from "@/lib/types";
+import { getModelOption, modelSizeMb, modelVram } from "@/lib/models";
 import { ModelDownloadModal } from "./ModelDownloadModal";
 import { HotkeyCapture } from "./HotkeyCapture";
 import { LLMSettingsSection } from "./meetings/LLMSettingsSection";
 import { MeetingsSettingsSection } from "./meetings/MeetingsSettingsSection";
 import { cn } from "@/lib/utils";
-
-// Hardcoded faster-whisper spec sheet. The backend exposes only model names,
-// so size/VRAM/speed/accuracy live here as the source of truth for the picker.
-type ModelMeta = {
-  sizeMb: number;
-  vram: string;
-  speed: 1 | 2 | 3 | 4 | 5;
-  accuracy: 1 | 2 | 3 | 4 | 5;
-  tagline: string;
-};
-
-const MODEL_META: Record<string, ModelMeta> = {
-  tiny:   { sizeMb: 75,   vram: "~1 GB",  speed: 5, accuracy: 1, tagline: "Fastest. Drafts and rough notes." },
-  base:   { sizeMb: 142,  vram: "~1 GB",  speed: 5, accuracy: 2, tagline: "Light footprint. Casual dictation." },
-  small:  { sizeMb: 466,  vram: "~2 GB",  speed: 4, accuracy: 3, tagline: "Balanced. Comfortable on CPU." },
-  medium: { sizeMb: 1500, vram: "~5 GB",  speed: 2, accuracy: 4, tagline: "More accurate. Heavier on resources." },
-  large:  { sizeMb: 2900, vram: "~10 GB", speed: 1, accuracy: 5, tagline: "Highest accuracy. Slowest." },
-  turbo:  { sizeMb: 1600, vram: "~6 GB",  speed: 4, accuracy: 5, tagline: "Fast and accurate. Recommended for GPU." },
-};
-
-const FALLBACK_META: ModelMeta = {
-  sizeMb: 0,
-  vram: "—",
-  speed: 3,
-  accuracy: 3,
-  tagline: "",
-};
 
 const THEME_ICONS: Record<string, React.ElementType> = {
   light: Sun,
@@ -754,7 +728,10 @@ function ModelPicker({
   return (
     <div className="border border-border rounded-md overflow-hidden bg-surface">
       {models.map((model, i) => {
-        const meta = MODEL_META[model] ?? FALLBACK_META;
+        const option = getModelOption(model);
+        const tagline = option?.tradeoff ?? "";
+        const speed = option?.speed ?? 3;
+        const accuracy = option?.accuracy ?? 3;
         const cached = statuses[model];
         const isActive = model === currentModel;
         const cacheState =
@@ -800,14 +777,14 @@ function ModelPicker({
                   )}
                 </div>
                 <p className="text-xs text-cream-muted mt-1 truncate">
-                  {meta.tagline}
+                  {tagline}
                 </p>
               </div>
               <div className="hidden sm:flex items-center gap-6 flex-shrink-0">
-                <ModelMetaCol label="size" value={formatModelSize(meta.sizeMb)} />
-                <ModelMetaCol label="vram" value={meta.vram} />
-                <DotMeter label="speed" value={meta.speed} />
-                <DotMeter label="accuracy" value={meta.accuracy} />
+                <ModelMetaCol label="size" value={formatModelSize(modelSizeMb(model))} />
+                <ModelMetaCol label="vram" value={modelVram(model)} />
+                <DotMeter label="speed" value={speed} />
+                <DotMeter label="accuracy" value={accuracy} />
               </div>
             </button>
             {canDelete && <ModelDeleteButton model={model} onDelete={onDelete} />}

@@ -22,18 +22,13 @@ from typing import Any, Callable, Optional
 
 from services.database import DatabaseService
 from services.logger import get_logger
-from services.recording.audio_source import ParecAudioSource, SoundDeviceAudioSource
+from services.recording.audio_source import SoundDeviceAudioSource
 from services.recording.export import UnknownExportFormatError, export_recording
 from services.recording.llm import (
     LLMConnectionError,
     OpenAICompatibleProvider,
 )
-from services.recording.loopback_linux import _filter_linux_loopback
-from services.recording.loopback_pulse import (
-    PULSE_ID_BASE,
-    list_pulse_monitor_sources,
-)
-from services.recording.loopback_windows import _filter_wasapi_loopback
+from services.recording.loopback import LoopbackDiscovery
 from services.recording.recorder import (
     NoAudioSourcesError,
     RecorderAlreadyStartedError,
@@ -72,6 +67,9 @@ log = get_logger("meeting")
 class _Job:
     recording_id: int
     cancel_token: CancelToken
+    # Per-job transcription overrides (model/device/language) set by the
+    # Re-transcribe modal. None means "use global settings".
+    overrides: Optional[dict] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,11 +173,11 @@ class _SerialJobQueue:
         self._thread = threading.Thread(target=self._loop, daemon=True, name=f"meetings-{name}")
         self._thread.start()
 
-    def enqueue(self, recording_id: int) -> CancelToken:
+    def enqueue(self, recording_id: int, overrides: Optional[dict] = None) -> CancelToken:
         token = CancelToken()
         with self._lock:
             self._cancels[recording_id] = token
-        self._queue.put(_Job(recording_id=recording_id, cancel_token=token))
+        self._queue.put(_Job(recording_id=recording_id, cancel_token=token, overrides=overrides))
         return token
 
     def cancel(self, recording_id: int) -> bool:
@@ -230,6 +228,10 @@ class MeetingsController:
         event_emitter: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
         self.db = db
+        # Recording persistence — the domain's own repository
+        # (services/recording/repository.py). Non-recording tables
+        # (settings, history) stay behind `self.db` / `self.settings`.
+        self.repo = db.recordings
         self.settings = settings_service
         self.transcription = transcription_service
         self.data_root = data_root
@@ -244,21 +246,13 @@ class MeetingsController:
         self.summary = SummaryService()
         # Pre-record source preview — see _SourcePreview for the why.
         self._preview = _SourcePreview()
-        # Session cache: PULSE_ID_BASE+N → PipeWire monitor source name. Populated
-        # by list_audio_sources() and read by start() so the user picks an int id
-        # in the dropdown but we open a ParecAudioSource with the actual name.
-        self._pulse_monitor_by_id: dict[int, str] = {}
+        # Loopback enumeration + source construction. Owns the pactl session
+        # cache (picker id → monitor source name); see loopback.py.
+        self._loopback = LoopbackDiscovery()
 
         # Background queues.
         self._transcribe_q = _SerialJobQueue("transcribe", self._run_transcribe)
         self._summarize_q = _SerialJobQueue("summarize", self._run_summarize)
-
-        # Per-recording transcription overrides — populated by transcribe(...)
-        # when the user picks a non-default model/device/language for a single
-        # job, consumed (and cleared) by _run_transcribe. Keeping it as a
-        # side-channel dict avoids reworking _SerialJobQueue's _Job dataclass.
-        self._transcribe_overrides: dict[int, dict[str, Optional[str]]] = {}
-        self._transcribe_overrides_lock = threading.Lock()
 
         # Server-side push ticker. Replaces the old 250 ms HTTP poll the
         # dashboard used to do: while a recording is active, fire `meeting-state`
@@ -285,26 +279,7 @@ class MeetingsController:
             log.warning("query_devices failed", error=str(exc))
             return {"mic": [], "loopback": []}
 
-        # Pick loopback sources via the platform-specific filter, then fall
-        # back to the OTHER platform's filter (in case PortAudio reports
-        # something unexpected). The filters are conservative — they won't
-        # double-list anything that doesn't look like loopback.
-        loopback = _filter_linux_loopback(devs, apis) + _filter_wasapi_loopback(devs, apis)
-
-        # PipeWire / PulseAudio monitor sources — pactl/parec path. This is
-        # what actually works on Linux for capturing Chrome / Teams audio,
-        # since PortAudio's JACK and ALSA backends both mangle monitor names.
-        self._pulse_monitor_by_id = {}
-        for entry in list_pulse_monitor_sources():
-            self._pulse_monitor_by_id[entry["id"]] = entry["pulseSourceName"]
-            loopback.append({
-                "id": entry["id"],
-                "name": entry["name"],
-                "kind": entry["kind"],
-                "hostApi": entry["hostApi"],
-                "isDefault": entry["isDefault"],
-            })
-
+        loopback = self._loopback.list_sources(devs, apis)
         loopback_ids = {item["id"] for item in loopback}
 
         # Mic = input devices that are NOT already classified as loopback.
@@ -413,7 +388,7 @@ class MeetingsController:
         # busy when the recorder tries to open it.
         self._preview.stop()
 
-        recording_id = self.db.create_recording(title=title or _default_title(), sources=sources)
+        recording_id = self.repo.create_recording(title=title or _default_title(), sources=sources)
         wav_rel = f"recordings/{recording_id}_{_slug(title)}.wav"
         wav_abs = self.data_root / wav_rel
         wav_abs.parent.mkdir(parents=True, exist_ok=True)
@@ -429,11 +404,11 @@ class MeetingsController:
                 loopback=loop_source,
             )
         except (RecorderAlreadyStartedError, RecorderNotRunningError, NoAudioSourcesError):
-            self.db.delete_recording(recording_id)
+            self.repo.delete_recording(recording_id)
             raise
 
-        self.db.set_recording_recorder_state(recording_id, "recording")
-        self.db.set_recording_audio(
+        self.repo.set_recording_recorder_state(recording_id, "recording")
+        self.repo.set_recording_audio(
             recording_id,
             audio_relpath=wav_rel,
             duration_ms=0,
@@ -451,18 +426,7 @@ class MeetingsController:
         return SoundDeviceAudioSource(device_id=device_id, loopback=False)
 
     def _build_loopback_source(self, device_id: Optional[int]):
-        if device_id is None:
-            return None
-        # Route PipeWire monitor sources through parec instead of PortAudio.
-        pulse_name = self._pulse_monitor_by_id.get(device_id)
-        if pulse_name is not None:
-            return ParecAudioSource(source_name=pulse_name)
-        return SoundDeviceAudioSource(
-            device_id=device_id,
-            # WASAPI loopback flag only matters on Windows; on Linux the
-            # PortAudio device IS the monitor source, no flag needed.
-            loopback=_is_windows(),
-        )
+        return self._loopback.build_source(device_id)
 
     # -------------------------------------------------------------- pre-record preview
 
@@ -498,7 +462,7 @@ class MeetingsController:
         state = self.recorder.get_state()
         rid = state.get("recording_id")
         if rid is not None:
-            self.db.set_recording_recorder_state(rid, "paused")
+            self.repo.set_recording_recorder_state(rid, "paused")
         self._emit_meeting_state("paused")
         return {"ok": True}
 
@@ -507,7 +471,7 @@ class MeetingsController:
         state = self.recorder.get_state()
         rid = state.get("recording_id")
         if rid is not None:
-            self.db.set_recording_recorder_state(rid, "recording")
+            self.repo.set_recording_recorder_state(rid, "recording")
         self._emit_meeting_state("recording")
         return {"ok": True}
 
@@ -518,21 +482,21 @@ class MeetingsController:
         self._stop_tick()
         self._emit_meeting_state("idle", duration_ms=result.get("duration_ms", 0))
         if rid is not None:
-            self.db.set_recording_audio(
+            self.repo.set_recording_audio(
                 rid,
-                audio_relpath=self.db.get_recording(rid)["audio_relpath"],
+                audio_relpath=self.repo.get_recording(rid)["audio_relpath"],
                 duration_ms=result["duration_ms"],
                 size_bytes=result["size_bytes"],
                 sample_rate=result["sample_rate"],
                 channels=result["channels"],
             )
-            self.db.set_recording_recorder_state(rid, None)
+            self.repo.set_recording_recorder_state(rid, None)
 
             # Auto-transcribe if enabled (default true).
             settings = self.settings.get_settings()
             if getattr(settings, "recordings_auto_transcribe", True):
                 self._transcribe_q.enqueue(rid)
-        return self._to_dto(self.db.get_recording(rid)) if rid is not None else {}
+        return self._to_dto(self.repo.get_recording(rid)) if rid is not None else {}
 
     def get_recorder_state(self) -> dict:
         st = self.recorder.get_state()
@@ -563,11 +527,11 @@ class MeetingsController:
     # -------------------------------------------------------------- library CRUD
 
     def list_recordings(self, limit: int, offset: int, search: Optional[str]) -> list[dict]:
-        rows = self.db.list_recordings(limit=limit, offset=offset, search=search)
+        rows = self.repo.list_recordings(limit=limit, offset=offset, search=search)
         return [self._to_dto(r) for r in rows]
 
     def get_recording(self, recording_id: int) -> Optional[dict]:
-        row = self.db.get_recording(recording_id, include_segments=True)
+        row = self.repo.get_recording(recording_id, include_segments=True)
         if row is None:
             return None
         dto = self._to_dto(row)
@@ -591,11 +555,11 @@ class MeetingsController:
         if "notes" in fields: translated["notes"] = fields["notes"]
         if "tags" in fields: translated["tags"] = fields["tags"]
         if "language" in fields: translated["language"] = fields["language"]
-        self.db.update_recording(recording_id, **translated)
-        return self._to_dto(self.db.get_recording(recording_id))
+        self.repo.update_recording(recording_id, **translated)
+        return self._to_dto(self.repo.get_recording(recording_id))
 
     def delete_recording(self, recording_id: int) -> dict:
-        row = self.db.get_recording(recording_id)
+        row = self.repo.get_recording(recording_id)
         if row and row.get("audio_relpath"):
             audio_path = (self.data_root / row["audio_relpath"]).resolve()
             try:
@@ -604,14 +568,14 @@ class MeetingsController:
                     audio_path.unlink()
             except (ValueError, OSError):
                 pass
-        self.db.delete_recording(recording_id)
+        self.repo.delete_recording(recording_id)
         return {"ok": True}
 
     def import_file(self, file_path: str, title: Optional[str]) -> dict:
         src = Path(file_path).expanduser().resolve()
         if not src.exists() or not src.is_file():
             raise FileNotFoundError(file_path)
-        rid = self.db.create_recording(title=title or src.stem, sources=[])
+        rid = self.repo.create_recording(title=title or src.stem, sources=[])
         ext = src.suffix.lower() or ".wav"
         rel = f"recordings/{rid}_{_slug(title or src.stem)}{ext}"
         dst = self.data_root / rel
@@ -631,7 +595,7 @@ class MeetingsController:
             sample_rate = None
 
         size_bytes = dst.stat().st_size
-        self.db.set_recording_audio(
+        self.repo.set_recording_audio(
             rid, audio_relpath=rel, duration_ms=duration_ms,
             size_bytes=size_bytes, sample_rate=sample_rate, channels=channels,
         )
@@ -643,7 +607,7 @@ class MeetingsController:
         return {"recording_id": rid}
 
     def export(self, recording_id: int, fmt: str) -> dict:
-        row = self.db.get_recording(recording_id, include_segments=True)
+        row = self.repo.get_recording(recording_id, include_segments=True)
         if row is None:
             raise FileNotFoundError(f"recording {recording_id} not found")
         try:
@@ -665,19 +629,16 @@ class MeetingsController:
         """Enqueue a transcription job for an existing recording.
 
         Pass `model` / `device` / `language` to override the global settings
-        for this single job (used by the Re-transcribe modal). Overrides are
-        consumed by `_run_transcribe`; on second enqueue, prior un-consumed
-        overrides for the same id are replaced.
+        for this single job (used by the Re-transcribe modal); they travel on
+        the _Job itself.
         """
+        overrides = None
         if model or device or language:
-            with self._transcribe_overrides_lock:
-                self._transcribe_overrides[recording_id] = {
-                    "model": model,
-                    "device": device,
-                    "language": language,
-                }
-        self._transcribe_q.enqueue(recording_id)
-        self.db.update_transcript_status(recording_id, "pending", progress=0)
+            overrides = {"model": model, "device": device, "language": language}
+        # Status is written before enqueueing so a fast worker can't have its
+        # own status write clobbered by this one.
+        self.repo.update_transcript_status(recording_id, "pending", progress=0)
+        self._transcribe_q.enqueue(recording_id, overrides=overrides)
         return {"ok": True}
 
     def cancel_transcribe(self, recording_id: int) -> dict:
@@ -688,8 +649,8 @@ class MeetingsController:
         # Store the override prompt (if any) on the recording's notes? No —
         # just hold it in the job. For v1 we always use the settings template
         # and ignore per-call overrides.
+        self.repo.update_summary_status(recording_id, "summarizing", progress=0)
         self._summarize_q.enqueue(recording_id)
-        self.db.update_summary_status(recording_id, "summarizing", progress=0)
         return {"ok": True}
 
     def cancel_summarize(self, recording_id: int) -> dict:
@@ -736,13 +697,20 @@ class MeetingsController:
             set_api_key(preset, apiKey)
         return {"ok": True}
 
+    def _probe_provider(
+        self, preset: str, endpoint: str, apiKey: Optional[str],
+    ) -> OpenAICompatibleProvider:
+        """Provider for connection tests / model listing against an endpoint
+        the user is still editing — falls back to the stored key when the
+        form's key field is blank."""
+        return OpenAICompatibleProvider(
+            endpoint=endpoint, api_key=apiKey or get_api_key(preset), default_model="probe",
+        )
+
     def test_llm_connection(
         self, preset: str, endpoint: str, apiKey: Optional[str] = None,
     ) -> dict:
-        key = apiKey or get_api_key(preset)
-        provider = OpenAICompatibleProvider(
-            endpoint=endpoint, api_key=key, default_model="probe",
-        )
+        provider = self._probe_provider(preset, endpoint, apiKey)
         try:
             models = provider.list_models()
             return {"ok": True, "error": None, "models": models}
@@ -752,11 +720,7 @@ class MeetingsController:
     def list_llm_models(
         self, preset: str, endpoint: str, apiKey: Optional[str] = None,
     ) -> list[str]:
-        key = apiKey or get_api_key(preset)
-        provider = OpenAICompatibleProvider(
-            endpoint=endpoint, api_key=key, default_model="probe",
-        )
-        return provider.list_models()
+        return self._probe_provider(preset, endpoint, apiKey).list_models()
 
     # -------------------------------------------------------------- crash recovery
 
@@ -770,28 +734,60 @@ class MeetingsController:
         )
 
     # -------------------------------------------------------------- job runners
+    #
+    # Job status protocol: every terminal outcome is a paired DB status write
+    # + a `recording-<kind>-complete` event, and the frontend depends on the
+    # pairing. _fail_job/_complete_job are the only places that pairing lives.
+
+    def _job_status_writer(self, kind: str) -> Callable:
+        return self.repo.update_transcript_status if kind == "transcribe" else self.repo.update_summary_status
+
+    def _fail_job(self, kind: str, rid: int, *, status: str = "error",
+                  db_error: Optional[str] = None, event_error: Optional[str] = None) -> None:
+        """Terminal failure: write status (with error unless cancelled) + emit
+        the completion event. `event_error` lets the user-facing message differ
+        from the persisted one."""
+        writer = self._job_status_writer(kind)
+        if status == "cancelled":
+            writer(rid, status)
+        else:
+            writer(rid, status, error=db_error)
+        self._emit(f"recording-{kind}-complete", {
+            "recordingId": rid, "success": False, "error": event_error or db_error or status,
+        })
+
+    def _complete_job(self, kind: str, rid: int, **status_kwargs) -> None:
+        self._job_status_writer(kind)(rid, "done", **status_kwargs)
+        self._emit(f"recording-{kind}-complete", {"recordingId": rid, "success": True})
+
+    def _provider_from_config(self) -> tuple[OpenAICompatibleProvider, dict]:
+        """Build the LLM provider from the persisted config. All presets speak
+        the OpenAI chat API today; if a second provider shape ever lands, this
+        and _probe_provider are the only construction points that need a
+        registry."""
+        config = self.get_llm_config()
+        provider = OpenAICompatibleProvider(
+            endpoint=config["endpoint"],
+            api_key=get_api_key(config["preset"]),
+            default_model=config["model"],
+        )
+        return provider, config
 
     def _run_transcribe(self, job: _Job) -> None:
         rid = job.recording_id
-        row = self.db.get_recording(rid)
+        row = self.repo.get_recording(rid)
         if row is None or not row.get("audio_relpath"):
-            self.db.update_transcript_status(rid, "error", error="audio not found")
-            self._emit("recording-transcribe-complete", {"recordingId": rid, "success": False, "error": "audio not found"})
+            self._fail_job("transcribe", rid, db_error="audio not found")
             return
 
         audio_path = self.data_root / row["audio_relpath"]
         if not audio_path.exists():
-            self.db.update_transcript_status(rid, "error", error="audio missing on disk")
-            self._emit("recording-transcribe-complete", {"recordingId": rid, "success": False, "error": "audio missing"})
+            self._fail_job("transcribe", rid, db_error="audio missing on disk", event_error="audio missing")
             return
 
-        self.db.update_transcript_status(rid, "transcribing", progress=0)
+        self.repo.update_transcript_status(rid, "transcribing", progress=0)
 
-        # Pull any per-job overrides set by transcribe(model=, device=, language=).
-        # Once consumed, they're cleared so a subsequent default-mode rerun
-        # falls back to global settings.
-        with self._transcribe_overrides_lock:
-            override = self._transcribe_overrides.pop(rid, None) or {}
+        override = job.overrides or {}
         try:
             settings = self.settings.get_settings()
             target_model = override.get("model") or settings.model or "tiny"
@@ -805,7 +801,7 @@ class MeetingsController:
             self.transcription.load_model(target_model, target_device)
 
             def on_progress(p: float, text: str) -> None:
-                self.db.update_transcript_status(rid, "transcribing", progress=p)
+                self.repo.update_transcript_status(rid, "transcribing", progress=p)
                 self._emit("recording-transcribe-progress", {
                     "recordingId": rid, "progress": p, "currentText": text,
                 })
@@ -817,22 +813,20 @@ class MeetingsController:
                 cancel_token=job.cancel_token,
             )
         except TranscriptionCancelled:
-            self.db.update_transcript_status(rid, "cancelled")
-            self._emit("recording-transcribe-complete", {"recordingId": rid, "success": False, "error": "cancelled"})
+            self._fail_job("transcribe", rid, status="cancelled", event_error="cancelled")
             return
         except Exception as exc:
             log.exception("transcription failed", recording_id=rid)
-            self.db.update_transcript_status(rid, "error", error=str(exc))
-            self._emit("recording-transcribe-complete", {"recordingId": rid, "success": False, "error": str(exc)})
+            self._fail_job("transcribe", rid, db_error=str(exc))
             return
 
-        self.db.set_recording_transcript(
+        self.repo.set_recording_transcript(
             rid,
             result["text"],
             language=result.get("language"),
             model=target_model,
         )
-        self.db.replace_recording_segments(rid, result["segments"])
+        self.repo.replace_recording_segments(rid, result["segments"])
 
         # Auto-rename the title from the transcript context. Best-effort —
         # runs while status is still "transcribing" so the detail page's
@@ -840,13 +834,12 @@ class MeetingsController:
         # that flips the status to done. Failure is logged and swallowed.
         self._maybe_auto_rename_title(rid, result["text"], job.cancel_token)
 
-        self.db.update_transcript_status(rid, "done", progress=1.0)
-        self._emit("recording-transcribe-complete", {"recordingId": rid, "success": True})
+        self._complete_job("transcribe", rid, progress=1.0)
 
         # Auto-summarize if enabled.
         if getattr(self.settings.get_settings(), "recordings_auto_summarize", False):
+            self.repo.update_summary_status(rid, "summarizing", progress=0)
             self._summarize_q.enqueue(rid)
-            self.db.update_summary_status(rid, "summarizing", progress=0)
 
     def _maybe_auto_rename_title(
         self,
@@ -864,7 +857,7 @@ class MeetingsController:
         if not getattr(settings, "recordings_auto_rename_title", True):
             return
 
-        row = self.db.get_recording(rid)
+        row = self.repo.get_recording(rid)
         if row is None:
             return
         current_title = row.get("title")
@@ -877,13 +870,7 @@ class MeetingsController:
             return
 
         try:
-            config = self.get_llm_config()
-            preset = config["preset"]
-            provider = OpenAICompatibleProvider(
-                endpoint=config["endpoint"],
-                api_key=get_api_key(preset),
-                default_model=config["model"],
-            )
+            provider, _config = self._provider_from_config()
             new_title = generate_title(
                 transcript, provider, cancel_token=cancel_token
             )
@@ -895,7 +882,7 @@ class MeetingsController:
             )
             return
 
-        self.db.update_recording(rid, title=new_title)
+        self.repo.update_recording(rid, title=new_title)
         log.info(
             "auto-renamed recording",
             recording_id=rid,
@@ -905,21 +892,12 @@ class MeetingsController:
 
     def _run_summarize(self, job: _Job) -> None:
         rid = job.recording_id
-        row = self.db.get_recording(rid, include_segments=True)
+        row = self.repo.get_recording(rid, include_segments=True)
         if row is None or not row.get("transcript"):
-            self.db.update_summary_status(rid, "error", error="no transcript yet")
-            self._emit("recording-summarize-complete", {"recordingId": rid, "success": False, "error": "no transcript"})
+            self._fail_job("summarize", rid, db_error="no transcript yet", event_error="no transcript")
             return
 
-        config = self.get_llm_config()
-        preset = config["preset"]
-        api_key = get_api_key(preset)
-
-        provider = OpenAICompatibleProvider(
-            endpoint=config["endpoint"],
-            api_key=api_key,
-            default_model=config["model"],
-        )
+        provider, config = self._provider_from_config()
 
         try:
             def on_stream(token: str) -> None:
@@ -937,14 +915,12 @@ class MeetingsController:
             )
         except Exception as exc:
             log.exception("summary failed", recording_id=rid)
-            self.db.update_summary_status(rid, "error", error=str(exc))
-            self._emit("recording-summarize-complete", {"recordingId": rid, "success": False, "error": str(exc)})
+            self._fail_job("summarize", rid, db_error=str(exc))
             return
 
-        self.db.update_recording(rid, summary=summary)
-        provider_label = f"{preset}:{config['model']}"
-        self.db.update_summary_status(rid, "done", progress=1.0, provider=provider_label)
-        self._emit("recording-summarize-complete", {"recordingId": rid, "success": True})
+        self.repo.update_recording(rid, summary=summary)
+        provider_label = f"{config['preset']}:{config['model']}"
+        self._complete_job("summarize", rid, progress=1.0, provider=provider_label)
 
     # -------------------------------------------------------------- dto
 
@@ -982,11 +958,6 @@ class MeetingsController:
 # ─────────────────────────────────────────────────────────────────────────────
 # helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _is_windows() -> bool:
-    import sys
-    return sys.platform.startswith("win")
-
 
 def _slug(s: str) -> str:
     import re

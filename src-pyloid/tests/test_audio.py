@@ -3,12 +3,28 @@ import numpy as np
 from services.audio import AudioService
 
 
+def _has_input_device() -> bool:
+    try:
+        import sounddevice as sd
+        sd.query_devices(kind="input")
+        return True
+    except Exception:
+        return False
+
+
+requires_input_device = pytest.mark.skipif(
+    not _has_input_device(),
+    reason="No audio input device available (headless CI)",
+)
+
+
 class TestAudioService:
     def test_initial_state_not_recording(self):
         """Audio service starts in non-recording state."""
         service = AudioService()
         assert service.is_recording() == False
 
+    @requires_input_device
     def test_start_recording_changes_state(self):
         """Starting recording changes state to recording."""
         service = AudioService()
@@ -19,6 +35,7 @@ class TestAudioService:
         # Cleanup
         service.stop_recording()
 
+    @requires_input_device
     def test_stop_recording_changes_state(self):
         """Stopping recording changes state back to not recording."""
         service = AudioService()
@@ -27,6 +44,7 @@ class TestAudioService:
 
         assert service.is_recording() == False
 
+    @requires_input_device
     def test_stop_recording_returns_numpy_array(self):
         """Stopping recording returns numpy array of audio data."""
         service = AudioService()
@@ -49,6 +67,7 @@ class TestAudioService:
         assert isinstance(audio, np.ndarray)
         assert len(audio) == 0
 
+    @requires_input_device
     def test_start_twice_is_idempotent(self):
         """Starting recording twice doesn't cause issues."""
         service = AudioService()
@@ -74,6 +93,7 @@ class TestAudioService:
         """Audio is recorded in mono."""
         assert AudioService.CHANNELS == 1
 
+    @requires_input_device
     def test_amplitude_callback_is_called(self):
         """Amplitude callback receives values during recording."""
         service = AudioService()

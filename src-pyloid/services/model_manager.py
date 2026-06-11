@@ -5,11 +5,15 @@ Provides:
 - is_model_cached(): Check if model exists in cache
 - get_model_info(): Get model metadata
 - download_model(): Download with progress and cancellation support
-- load_model(): Load already-downloaded model
-- ensure_model_ready(): Download if needed + load
+- start_download() / cancel_download() / get_download_status(): single-flight
+  background download session with event emission (the RPC surface)
 - get_available_models(): Get list of all supported models
+- delete_model() / clear_cache(): Cache management
 
-Uses faster_whisper's download_model() which handles HuggingFace Hub internally.
+Model loading lives in TranscriptionService (the only load path — it resolves
+the user's device preference). The model catalog (names, sizes, repos) lives
+in services.model_catalog.
+
 Cache location: ~/.cache/huggingface/hub/
 """
 from dataclasses import dataclass
@@ -21,62 +25,14 @@ import os
 import io
 
 from services.logger import get_logger
+from services.model_catalog import (
+    MODEL_SIZES,
+    MODEL_REPOS,
+    get_repo_id as _get_repo_id,
+    hf_cache_folder_name,
+)
 
 log = get_logger("model")
-
-
-# All models supported by faster-whisper with approximate download sizes (bytes)
-# Sizes are estimates based on the CTranslate2 converted models
-MODEL_SIZES = {
-    # Standard models (multilingual)
-    "tiny": 75_000_000,           # ~75 MB
-    "base": 145_000_000,          # ~145 MB
-    "small": 466_000_000,         # ~466 MB
-    "medium": 1_530_000_000,      # ~1.53 GB
-    "large-v1": 3_090_000_000,    # ~3.09 GB
-    "large-v2": 3_090_000_000,    # ~3.09 GB
-    "large-v3": 3_090_000_000,    # ~3.09 GB
-    "turbo": 1_620_000_000,       # ~1.62 GB (large-v3-turbo)
-    # English-only models (slightly smaller, optimized for English)
-    "tiny.en": 75_000_000,        # ~75 MB
-    "base.en": 145_000_000,       # ~145 MB
-    "small.en": 466_000_000,      # ~466 MB
-    "medium.en": 1_530_000_000,   # ~1.53 GB
-    # Distilled models (faster inference, English-only)
-    "distil-small.en": 332_000_000,    # ~332 MB
-    "distil-medium.en": 756_000_000,   # ~756 MB
-    "distil-large-v2": 1_510_000_000,  # ~1.51 GB
-    "distil-large-v3": 1_510_000_000,  # ~1.51 GB
-}
-
-# Model name to HuggingFace repo ID mapping
-# Based on faster-whisper's internal mapping
-MODEL_REPOS = {
-    # Standard multilingual models
-    "tiny": "Systran/faster-whisper-tiny",
-    "base": "Systran/faster-whisper-base",
-    "small": "Systran/faster-whisper-small",
-    "medium": "Systran/faster-whisper-medium",
-    "large-v1": "Systran/faster-whisper-large-v1",
-    "large-v2": "Systran/faster-whisper-large-v2",
-    "large-v3": "Systran/faster-whisper-large-v3",
-    "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
-    # English-only models
-    "tiny.en": "Systran/faster-whisper-tiny.en",
-    "base.en": "Systran/faster-whisper-base.en",
-    "small.en": "Systran/faster-whisper-small.en",
-    "medium.en": "Systran/faster-whisper-medium.en",
-    # Distilled models
-    "distil-small.en": "Systran/faster-distil-whisper-small.en",
-    "distil-medium.en": "Systran/faster-distil-whisper-medium.en",
-    "distil-large-v2": "Systran/faster-distil-whisper-large-v2",
-    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
-}
-
-
-def _get_repo_id(model_name: str) -> str:
-    """Get the HuggingFace repo ID for a model name."""
-    return MODEL_REPOS.get(model_name, f"Systran/faster-whisper-{model_name}")
 
 
 @dataclass
@@ -99,6 +55,7 @@ class ModelInfo:
     name: str
     size_bytes: int
     cached: bool
+    repo_id: str = ""
 
 
 @dataclass
@@ -196,6 +153,11 @@ class ModelManager:
 
     def __init__(self):
         self._download_lock = threading.Lock()
+        # Single-flight download session state. Guarded by _session_lock;
+        # only one background download runs at a time and its progress is
+        # queryable so the UI can re-attach after navigating away.
+        self._session_lock = threading.Lock()
+        self._session: Optional[dict] = None
 
     def get_available_models(self) -> list:
         """Get list of all supported model names."""
@@ -248,7 +210,8 @@ class ModelManager:
         return ModelInfo(
             name=model_name,
             size_bytes=size_bytes,
-            cached=cached
+            cached=cached,
+            repo_id=_get_repo_id(model_name)
         )
 
     def download_model(
@@ -479,73 +442,117 @@ class ModelManager:
             log.error("Model download failed", model=model_name, error=result["error"])
             return False
 
-    def load_model(self, model_name: str):
-        """
-        Load an already-downloaded model.
+    # ------------------------------------------------------------------
+    # Background download session (the RPC-facing surface)
+    #
+    # One download at a time. Starting a new download cancels the previous
+    # one. Progress and completion are pushed through the emit callback as
+    # ("download-progress", payload) / ("download-complete", payload) and the
+    # latest progress snapshot is queryable via get_download_status() so a
+    # remounted UI can re-attach to an in-flight download.
+    # ------------------------------------------------------------------
+
+    def start_download(self, model_name: str, emit: Callable[[str, dict], None]) -> dict:
+        """Start a background download session for a model.
 
         Args:
-            model_name: Name of the model to load
+            model_name: Name of the model to download
+            emit: Callback(event_name, payload) used for progress/completion
+                  events. Payload keys are camelCase (the frontend contract).
 
         Returns:
-            WhisperModel instance
-
-        Raises:
-            RuntimeError: If model is not cached
+            dict: {"success": True, "alreadyCached": True} if nothing to do,
+                  {"success": True, "started": True} if a session started.
         """
-        if not self.is_model_cached(model_name):
-            raise RuntimeError(f"Model '{model_name}' is not cached. Download it first.")
+        with self._session_lock:
+            # Cancel any in-flight session before starting a new one
+            if self._session is not None and not self._session["done"]:
+                log.info("Cancelling previous download for new request")
+                self._session["token"].cancel()
 
-        from faster_whisper import WhisperModel
+            if self.is_model_cached(model_name):
+                log.info("Model already cached", model=model_name)
+                emit("download-complete", {
+                    "model": model_name,
+                    "success": True,
+                    "alreadyCached": True
+                })
+                return {"success": True, "alreadyCached": True}
 
-        # Use repo_id for loading to ensure correct model is loaded
-        repo_id = _get_repo_id(model_name)
-        log.info("Loading model", model=model_name, repo_id=repo_id)
-        model = WhisperModel(
-            repo_id,
-            device="cpu",
-            compute_type="int8"
-        )
-        log.info("Model loaded successfully", model=model_name)
+            token = CancelToken()
+            session = {
+                "model": model_name,
+                "token": token,
+                "done": False,
+                "progress": None,  # last DownloadProgress payload (camelCase)
+            }
 
-        return model
+            def on_progress(progress: DownloadProgress):
+                payload = {
+                    "model": progress.model_name,
+                    "percent": progress.percent,
+                    "downloadedBytes": progress.downloaded_bytes,
+                    "totalBytes": progress.total_bytes,
+                    "speedBps": progress.speed_bps,
+                    "etaSeconds": progress.eta_seconds
+                }
+                session["progress"] = payload
+                emit("download-progress", payload)
 
-    def ensure_model_ready(
-        self,
-        model_name: str,
-        on_progress: Optional[Callable[[DownloadProgress], None]] = None,
-        cancel_token: Optional[CancelToken] = None
-    ):
+            def run():
+                try:
+                    success = self.download_model(model_name, on_progress, token)
+                    emit("download-complete", {
+                        "model": model_name,
+                        "success": success,
+                        "cancelled": token.is_cancelled()
+                    })
+                except Exception as e:
+                    log.error("Download thread error", error=str(e))
+                    emit("download-complete", {
+                        "model": model_name,
+                        "success": False,
+                        "error": str(e)
+                    })
+                finally:
+                    session["done"] = True
+
+            session["thread"] = threading.Thread(target=run, daemon=True)
+            self._session = session
+            session["thread"].start()
+
+        log.info("Started model download", model=model_name)
+        return {"success": True, "started": True}
+
+    def cancel_download(self) -> dict:
+        """Cancel the active download session, if any."""
+        with self._session_lock:
+            session = self._session
+            if session is not None and not session["done"] and not session["token"].is_cancelled():
+                log.info("Cancelling model download", model=session["model"])
+                session["token"].cancel()
+                return {"success": True, "cancelled": True}
+        return {"success": True, "cancelled": False}
+
+    def get_download_status(self) -> dict:
+        """Snapshot of the active download session (camelCase payload).
+
+        Returns {"active": False} when no download is running; otherwise the
+        last progress payload plus "active": True so the UI can re-attach.
         """
-        Ensure a model is downloaded and load it.
-
-        Downloads the model if not cached, then loads it.
-
-        Args:
-            model_name: Name of the model
-            on_progress: Optional callback for download progress
-            cancel_token: Optional token to cancel the download
-
-        Returns:
-            WhisperModel instance
-
-        Raises:
-            RuntimeError: If download fails or is cancelled
-        """
-        if not self.is_model_cached(model_name):
-            log.info("Model not cached, downloading", model=model_name)
-
-            # Set up defaults if not provided
-            if on_progress is None:
-                on_progress = lambda p: None
-            if cancel_token is None:
-                cancel_token = CancelToken()
-
-            success = self.download_model(model_name, on_progress, cancel_token)
-
-            if not success:
-                raise RuntimeError(f"Failed to download model '{model_name}'")
-
-        return self.load_model(model_name)
+        with self._session_lock:
+            session = self._session
+            if session is None or session["done"] or session["token"].is_cancelled():
+                return {"active": False, "model": None}
+            progress = session["progress"] or {
+                "model": session["model"],
+                "percent": 0,
+                "downloadedBytes": 0,
+                "totalBytes": MODEL_SIZES.get(session["model"], 0),
+                "speedBps": 0,
+                "etaSeconds": 0,
+            }
+            return {"active": True, **progress}
 
     def clear_cache(self) -> dict:
         """
@@ -581,10 +588,7 @@ class ModelManager:
             # Find and delete all faster-whisper model directories
             # HuggingFace stores models as: models--{org}--{repo}
             for model_name, repo_id in MODEL_REPOS.items():
-                # Convert repo_id to HuggingFace cache folder name
-                # e.g., "Systran/faster-whisper-tiny" -> "models--Systran--faster-whisper-tiny"
-                cache_folder_name = f"models--{repo_id.replace('/', '--')}"
-                model_cache_path = cache_dir / cache_folder_name
+                model_cache_path = cache_dir / hf_cache_folder_name(repo_id)
 
                 if model_cache_path.exists():
                     # Calculate size before deleting
@@ -642,8 +646,7 @@ class ModelManager:
 
         try:
             cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-            cache_folder_name = f"models--{repo_id.replace('/', '--')}"
-            model_cache_path = cache_dir / cache_folder_name
+            model_cache_path = cache_dir / hf_cache_folder_name(repo_id)
 
             if not model_cache_path.exists():
                 log.info("Model not cached, nothing to delete", model=model_name)

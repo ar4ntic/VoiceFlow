@@ -11,6 +11,7 @@ import type {
   CudnnDownloadInfo,
   CudnnDownloadResult,
   CudnnDownloadProgress,
+  DownloadStatus,
   AudioSourceList,
   RecorderState,
   Recording,
@@ -122,6 +123,10 @@ export const api = {
 
   async cancelModelDownload(): Promise<{ success: boolean; cancelled: boolean }> {
     return rpc.call("cancel_model_download");
+  },
+
+  async getDownloadStatus(): Promise<DownloadStatus> {
+    return rpc.call("get_download_status");
   },
 
   async clearModelCache(): Promise<{ success: boolean; deleted_bytes: number; deleted_models: string[]; error: string | null }> {

@@ -1,19 +1,8 @@
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, fields
+from typing import Optional
 from .database import DatabaseService
 from .hotkey import normalize_hotkey
-
-
-# Whisper model options - all models supported by faster-whisper
-# Order: multilingual models first, then English-only, then distilled
-WHISPER_MODELS = [
-    # Multilingual models (most commonly used)
-    "tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "turbo",
-    # English-only models (optimized for English)
-    "tiny.en", "base.en", "small.en", "medium.en",
-    # Distilled models (faster inference, English-only)
-    "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3",
-]
+from .model_catalog import WHISPER_MODELS
 
 # Supported languages (subset - full list at https://github.com/openai/whisper)
 WHISPER_LANGUAGES = [
@@ -85,6 +74,73 @@ class Settings:
     llm_prompt_template: str = DEFAULT_LLM_PROMPT
 
 
+# The Settings dataclass above is the single schema for all settings: field
+# names are the DB keys, defaults are the app defaults, and the camelCase
+# aliases used over RPC are derived mechanically by to_camel_case(). Adding a
+# setting = adding a field (plus RPC_SETTINGS_FIELDS if it is exposed on the
+# main settings RPC surface).
+
+# Hotkey fields are normalized before storage so stored values stay canonical.
+_HOTKEY_FIELDS = {"hold_hotkey", "toggle_hotkey"}
+
+# Settings exposed over the get_settings/update_settings RPC surface.
+# Recordings/LLM settings are managed through the meetings.* RPC methods and
+# are intentionally absent here.
+RPC_SETTINGS_FIELDS = (
+    "language",
+    "model",
+    "device",
+    "auto_start",
+    "retention",
+    "theme",
+    "onboarding_complete",
+    "microphone",
+    "save_audio_to_history",
+    "show_popup",
+    "hold_hotkey",
+    "hold_hotkey_enabled",
+    "toggle_hotkey",
+    "toggle_hotkey_enabled",
+    "prepend_space",
+    "recordings_auto_rename_title",
+)
+
+
+def to_camel_case(name: str) -> str:
+    head, *rest = name.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def settings_to_rpc(settings: "Settings") -> dict:
+    """Render the RPC-exposed subset of Settings as a camelCase dict."""
+    return {to_camel_case(name): getattr(settings, name) for name in RPC_SETTINGS_FIELDS}
+
+
+def rpc_to_settings_kwargs(payload: dict) -> dict:
+    """Map camelCase RPC keys back to Settings field names, dropping unknowns."""
+    mapped = {}
+    for name in RPC_SETTINGS_FIELDS:
+        camel = to_camel_case(name)
+        if camel in payload:
+            mapped[name] = payload[camel]
+    return mapped
+
+
+def _serialize(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _parse(raw: str, default):
+    # bool check must precede int: bool is a subclass of int.
+    if isinstance(default, bool):
+        return raw == "true"
+    if isinstance(default, int):
+        return int(raw)
+    return raw
+
+
 class SettingsService:
     def __init__(self, db: DatabaseService):
         self.db = db
@@ -94,121 +150,30 @@ class SettingsService:
         if self._cache:
             return self._cache
 
-        settings = Settings(
-            language=self.db.get_setting("language", "auto"),
-            model=self.db.get_setting("model", "tiny"),
-            device=self.db.get_setting("device", "auto"),
-            auto_start=self.db.get_setting("auto_start", "true") == "true",
-            retention=int(self.db.get_setting("retention", "-1")),
-            theme=self.db.get_setting("theme", "dark"),
-            onboarding_complete=self.db.get_setting("onboarding_complete", "false") == "true",
-            microphone=int(self.db.get_setting("microphone", "-1")),
-            save_audio_to_history=self.db.get_setting("save_audio_to_history", "false") == "true",
-            # UI settings
-            show_popup=self.db.get_setting("show_popup", "true") == "true",
-            # Hotkey settings
-            hold_hotkey=self.db.get_setting("hold_hotkey", "ctrl+win"),
-            hold_hotkey_enabled=self.db.get_setting("hold_hotkey_enabled", "true") == "true",
-            toggle_hotkey=self.db.get_setting("toggle_hotkey", "ctrl+shift+win"),
-            toggle_hotkey_enabled=self.db.get_setting("toggle_hotkey_enabled", "false") == "true",
-            # Transcription settings
-            prepend_space=self.db.get_setting("prepend_space", "false") == "true",
-            # Recordings (Meetings)
-            recordings_mic_device=self.db.get_setting("recordings_mic_device", None),
-            recordings_loopback_device=self.db.get_setting("recordings_loopback_device", None),
-            recordings_auto_transcribe=self.db.get_setting("recordings_auto_transcribe", "true") == "true",
-            recordings_auto_summarize=self.db.get_setting("recordings_auto_summarize", "false") == "true",
-            recordings_auto_rename_title=self.db.get_setting("recordings_auto_rename_title", "true") == "true",
-            # LLM config
-            llm_preset=self.db.get_setting("llm_preset", "ollama"),
-            llm_endpoint=self.db.get_setting("llm_endpoint", "http://localhost:11434/v1"),
-            llm_model=self.db.get_setting("llm_model", "llama3.2"),
-            llm_prompt_template=self.db.get_setting("llm_prompt_template", DEFAULT_LLM_PROMPT),
-        )
+        values = {}
+        for field in fields(Settings):
+            raw = self.db.get_setting(field.name, None)
+            values[field.name] = field.default if raw is None else _parse(raw, field.default)
+
+        settings = Settings(**values)
         self._cache = settings
         return settings
 
-    def update_settings(
-        self,
-        *,
-        language: Optional[str] = None,
-        model: Optional[str] = None,
-        device: Optional[str] = None,
-        auto_start: Optional[bool] = None,
-        retention: Optional[int] = None,
-        theme: Optional[str] = None,
-        onboarding_complete: Optional[bool] = None,
-        microphone: Optional[int] = None,
-        save_audio_to_history: Optional[bool] = None,
-        hold_hotkey: Optional[str] = None,
-        hold_hotkey_enabled: Optional[bool] = None,
-        toggle_hotkey: Optional[str] = None,
-        toggle_hotkey_enabled: Optional[bool] = None,
-        show_popup: Optional[bool] = None,
-        prepend_space: Optional[bool] = None,
-        # Recordings
-        recordings_mic_device: Optional[str] = None,
-        recordings_loopback_device: Optional[str] = None,
-        recordings_auto_transcribe: Optional[bool] = None,
-        recordings_auto_summarize: Optional[bool] = None,
-        recordings_auto_rename_title: Optional[bool] = None,
-        # LLM
-        llm_preset: Optional[str] = None,
-        llm_endpoint: Optional[str] = None,
-        llm_model: Optional[str] = None,
-        llm_prompt_template: Optional[str] = None,
-    ) -> Settings:
-        if language is not None:
-            self.db.set_setting("language", language)
-        if model is not None:
-            self.db.set_setting("model", model)
-        if device is not None:
-            self.db.set_setting("device", device)
-        if auto_start is not None:
-            self.db.set_setting("auto_start", "true" if auto_start else "false")
-        if retention is not None:
-            self.db.set_setting("retention", str(retention))
-        if theme is not None:
-            self.db.set_setting("theme", theme)
-        if onboarding_complete is not None:
-            self.db.set_setting("onboarding_complete", "true" if onboarding_complete else "false")
-        if microphone is not None:
-            self.db.set_setting("microphone", str(microphone))
-        if save_audio_to_history is not None:
-            self.db.set_setting("save_audio_to_history", "true" if save_audio_to_history else "false")
-        if show_popup is not None:
-            self.db.set_setting("show_popup", "true" if show_popup else "false")
-        if prepend_space is not None:
-            self.db.set_setting("prepend_space", "true" if prepend_space else "false")
-        # Hotkey settings - normalize before storing for consistent format
-        if hold_hotkey is not None:
-            self.db.set_setting("hold_hotkey", normalize_hotkey(hold_hotkey))
-        if hold_hotkey_enabled is not None:
-            self.db.set_setting("hold_hotkey_enabled", "true" if hold_hotkey_enabled else "false")
-        if toggle_hotkey is not None:
-            self.db.set_setting("toggle_hotkey", normalize_hotkey(toggle_hotkey))
-        if toggle_hotkey_enabled is not None:
-            self.db.set_setting("toggle_hotkey_enabled", "true" if toggle_hotkey_enabled else "false")
-        # Recordings (Meetings)
-        if recordings_mic_device is not None:
-            self.db.set_setting("recordings_mic_device", recordings_mic_device)
-        if recordings_loopback_device is not None:
-            self.db.set_setting("recordings_loopback_device", recordings_loopback_device)
-        if recordings_auto_transcribe is not None:
-            self.db.set_setting("recordings_auto_transcribe", "true" if recordings_auto_transcribe else "false")
-        if recordings_auto_summarize is not None:
-            self.db.set_setting("recordings_auto_summarize", "true" if recordings_auto_summarize else "false")
-        if recordings_auto_rename_title is not None:
-            self.db.set_setting("recordings_auto_rename_title", "true" if recordings_auto_rename_title else "false")
-        # LLM config
-        if llm_preset is not None:
-            self.db.set_setting("llm_preset", llm_preset)
-        if llm_endpoint is not None:
-            self.db.set_setting("llm_endpoint", llm_endpoint)
-        if llm_model is not None:
-            self.db.set_setting("llm_model", llm_model)
-        if llm_prompt_template is not None:
-            self.db.set_setting("llm_prompt_template", llm_prompt_template)
+    def update_settings(self, **kwargs) -> Settings:
+        """Persist the given settings. Keys are Settings field names; None
+        values mean "leave unchanged". Unknown keys raise before anything is
+        written."""
+        known = {field.name for field in fields(Settings)}
+        unknown = set(kwargs) - known
+        if unknown:
+            raise TypeError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
+
+        for key, value in kwargs.items():
+            if value is None:
+                continue
+            if key in _HOTKEY_FIELDS:
+                value = normalize_hotkey(value)
+            self.db.set_setting(key, _serialize(value))
 
         self._cache = None  # Invalidate cache
         return self.get_settings()

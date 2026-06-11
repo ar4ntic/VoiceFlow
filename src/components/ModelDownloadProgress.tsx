@@ -1,29 +1,10 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState } from "react";
 import { Download, X, Check, AlertCircle, Loader2, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
-import type { DownloadProgress, DownloadComplete } from "@/lib/types";
-
-// HuggingFace URLs for manual download
-const MODEL_HUGGINGFACE_URLS: Record<string, string> = {
-  "tiny": "https://huggingface.co/Systran/faster-whisper-tiny",
-  "base": "https://huggingface.co/Systran/faster-whisper-base",
-  "small": "https://huggingface.co/Systran/faster-whisper-small",
-  "medium": "https://huggingface.co/Systran/faster-whisper-medium",
-  "large-v1": "https://huggingface.co/Systran/faster-whisper-large-v1",
-  "large-v2": "https://huggingface.co/Systran/faster-whisper-large-v2",
-  "large-v3": "https://huggingface.co/Systran/faster-whisper-large-v3",
-  "turbo": "https://huggingface.co/Systran/faster-whisper-large-v3-turbo",
-  "tiny.en": "https://huggingface.co/Systran/faster-whisper-tiny.en",
-  "base.en": "https://huggingface.co/Systran/faster-whisper-base.en",
-  "small.en": "https://huggingface.co/Systran/faster-whisper-small.en",
-  "medium.en": "https://huggingface.co/Systran/faster-whisper-medium.en",
-  "distil-small.en": "https://huggingface.co/Systran/faster-distil-whisper-small.en",
-  "distil-medium.en": "https://huggingface.co/Systran/faster-distil-whisper-medium.en",
-  "distil-large-v2": "https://huggingface.co/Systran/faster-distil-whisper-large-v2",
-  "distil-large-v3": "https://huggingface.co/Systran/faster-distil-whisper-large-v3",
-};
+import { huggingFaceUrl } from "@/lib/models";
+import { useModelDownload } from "@/hooks/useModelDownload";
 
 interface ModelDownloadProgressProps {
   modelName: string;
@@ -52,8 +33,6 @@ function formatEta(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-type DownloadState = "idle" | "downloading" | "completed" | "cancelled" | "error";
-
 export function ModelDownloadProgress({
   modelName,
   onStart,
@@ -61,92 +40,26 @@ export function ModelDownloadProgress({
   onCancel,
   autoStart = true,
 }: ModelDownloadProgressProps) {
-  const [state, setState] = useState<DownloadState>("idle");
-  const [progress, setProgress] = useState<DownloadProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const hasStarted = useRef(false);
+  const { state, progress, error, cancel, retry } = useModelDownload(modelName, {
+    autoStart,
+    onStart,
+    onComplete,
+    onCancel,
+  });
 
-  // Handle download progress events
-  const handleProgress = useCallback((e: CustomEvent<DownloadProgress>) => {
-    setProgress(e.detail);
-  }, []);
-
-  // Handle download complete events
-  const handleCompleteEvent = useCallback(
-    (e: CustomEvent<DownloadComplete>) => {
-      const result = e.detail;
-
-      if (result.success) {
-        setState("completed");
-        onComplete(true);
-      } else if (result.cancelled) {
-        setState("cancelled");
-        onCancel?.();
-      } else {
-        setState("error");
-        setError(result.error || "Download failed");
-        onComplete(false);
-      }
-    },
-    [onComplete, onCancel]
-  );
-
-  // Set up event listeners
+  // Repo id powers the manual-download fallback in the error state. Fetched
+  // once from the backend rather than hardcoding a URL map on the frontend.
+  const [repoId, setRepoId] = useState<string | null>(null);
   useEffect(() => {
-    document.addEventListener("download-progress", handleProgress as EventListener);
-    document.addEventListener("download-complete", handleCompleteEvent as EventListener);
-
+    let active = true;
+    api
+      .getModelInfo(modelName)
+      .then((info) => active && setRepoId(info.repoId))
+      .catch(() => {});
     return () => {
-      document.removeEventListener("download-progress", handleProgress as EventListener);
-      document.removeEventListener("download-complete", handleCompleteEvent as EventListener);
+      active = false;
     };
-  }, [handleProgress, handleCompleteEvent]);
-
-  // Auto-start download
-  useEffect(() => {
-    if (autoStart && !hasStarted.current && state === "idle") {
-      hasStarted.current = true;
-      startDownload();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- startDownload is guarded by hasStarted.current ref
-  }, [autoStart, state]);
-
-  const startDownload = async () => {
-    try {
-      setError(null);
-
-      const result = await api.startModelDownload(modelName);
-
-      if (result.alreadyCached) {
-        // Model was already cached, show completed state immediately
-        setState("completed");
-      } else {
-        // Actually downloading - notify parent
-        setState("downloading");
-        onStart?.();
-      }
-    } catch (err) {
-      setState("error");
-      setError(err instanceof Error ? err.message : "Failed to start download");
-    }
-  };
-
-  const handleCancel = async () => {
-    try {
-      await api.cancelModelDownload();
-      // Don't update state here - wait for the complete event
-    } catch (err) {
-      console.error("Failed to cancel download:", err);
-    }
-  };
-
-  const handleRetry = () => {
-    hasStarted.current = false;
-    setState("idle");
-    setError(null);
-    setProgress(null);
-    startDownload();
-  };
+  }, [modelName]);
 
   // Render based on state
   if (state === "completed") {
@@ -168,7 +81,7 @@ export function ModelDownloadProgress({
   }
 
   if (state === "error") {
-    const huggingFaceUrl = MODEL_HUGGINGFACE_URLS[modelName];
+    const hfUrl = huggingFaceUrl(repoId);
 
     return (
       <div className="space-y-4 max-w-md w-full">
@@ -183,14 +96,14 @@ export function ModelDownloadProgress({
             {error || "An error occurred"}
           </p>
           <div className="flex flex-col gap-2">
-            <Button onClick={handleRetry} variant="outline" className="rounded-xl">
+            <Button onClick={retry} variant="outline" className="rounded-xl">
               Try Again
             </Button>
-            {huggingFaceUrl && (
+            {hfUrl && (
               <Button
                 variant="ghost"
                 className="rounded-xl text-xs"
-                onClick={() => api.openExternalUrl(huggingFaceUrl)}
+                onClick={() => api.openExternalUrl(hfUrl)}
               >
                 <ExternalLink className="w-3 h-3 mr-1.5" />
                 Download from HuggingFace
@@ -199,7 +112,7 @@ export function ModelDownloadProgress({
           </div>
         </div>
 
-        {huggingFaceUrl && (
+        {hfUrl && (
           <div className="glass-card p-4 text-left">
             <p className="text-xs font-medium text-foreground mb-2">Manual Download Instructions:</p>
             <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside">
@@ -232,7 +145,7 @@ export function ModelDownloadProgress({
           <p className="text-sm text-muted-foreground mb-4">
             The model download was cancelled
           </p>
-          <Button onClick={handleRetry} variant="outline" className="rounded-xl">
+          <Button onClick={retry} variant="outline" className="rounded-xl">
             Start Again
           </Button>
         </div>
@@ -292,7 +205,7 @@ export function ModelDownloadProgress({
       {/* Cancel button */}
       <Button
         variant="ghost"
-        onClick={handleCancel}
+        onClick={cancel}
         className="w-full rounded-xl text-muted-foreground hover:text-destructive"
       >
         <X className="w-4 h-4 mr-2" />

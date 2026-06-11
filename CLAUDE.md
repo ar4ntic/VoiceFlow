@@ -75,7 +75,8 @@ Python backend using Pyloid framework with PySide6:
 - `settings.py` - Settings management with defaults
 - `database.py` - SQLite database for settings and history (stored at ~/.VoiceFlow/VoiceFlow.db)
 - `logger.py` - Domain-based logging with hybrid format `[timestamp] [LEVEL] [domain] message | {json}`. Supports domains: model, audio, hotkey, settings, database, clipboard, window, plus Meeting-Mode domains (recording, transcribe, summary, llm). Configured with 100MB log rotation.
-- `model_manager.py` - Whisper model download/cache management using huggingface_hub. Provides download progress tracking (percent, speed, ETA), cancellation via CancelToken, daemon thread execution, and `clear_cache()` to delete only VoiceFlow's faster-whisper models.
+- `model_catalog.py` - Single source of truth for the Whisper model catalog (names, sizes, HF repo IDs). Imported by `model_manager`, `transcription`, and `settings`; the frontend gets repo IDs over RPC (`get_model_info` → `repoId`) rather than keeping its own copy. Never re-declare the model list elsewhere.
+- `model_manager.py` - Whisper model download/cache management using huggingface_hub. Owns the single-flight background download session (`start_download` / `cancel_download` / `get_download_status` — the RPC surface), download progress tracking (percent, speed, ETA), cancellation via CancelToken, and `delete_model()` / `clear_cache()`. Model *loading* lives in `TranscriptionService` (the only load path, since it resolves the user's device preference).
 
 **Meeting Mode services (src-pyloid/services/recording/):**
 Self-contained per `docs/adr/0003-meeting-mode-isolation.md`; do not call these from the PTT path and vice versa.

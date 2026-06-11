@@ -60,6 +60,21 @@ export interface ModelInfo {
   name: string;
   sizeBytes: number;
   cached: boolean;
+  /** HuggingFace repo id, e.g. "Systran/faster-whisper-tiny". Source of the
+   *  manual-download URL — the frontend no longer hardcodes the mapping. */
+  repoId: string;
+}
+
+/** Snapshot of an in-flight model download, returned by getDownloadStatus().
+ *  Lets a remounted view re-attach instead of losing the running download. */
+export interface DownloadStatus {
+  active: boolean;
+  model?: string | null;
+  percent?: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  speedBps?: number;
+  etaSeconds?: number;
 }
 
 export interface DownloadProgress {

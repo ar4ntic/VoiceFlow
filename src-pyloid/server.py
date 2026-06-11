@@ -2,7 +2,7 @@ from typing import Optional
 from pyloid.rpc import PyloidRPC, RPCContext
 from app_controller import get_controller
 from services.logger import get_logger
-from services.model_manager import get_model_manager, CancelToken, DownloadProgress
+from services.model_manager import get_model_manager
 import threading
 
 log = get_logger("window")
@@ -16,9 +16,11 @@ _on_data_reset = None
 _on_popup_visibility_changed = None  # Callback when showPopup setting changes
 _send_download_progress = None  # Callback to send progress to frontend
 
-# Active download state
-_active_download_token: CancelToken = None
-_download_thread: threading.Thread = None
+
+def _emit_download_event(event_name: str, payload: dict) -> None:
+    """Forward a download event to the frontend if the bridge is registered."""
+    if _send_download_progress:
+        _send_download_progress(event_name, payload)
 
 
 def register_download_progress_callback(callback):
@@ -415,7 +417,8 @@ async def get_model_info(model_name: str):
     return {
         "name": info.name,
         "sizeBytes": info.size_bytes,
-        "cached": info.cached
+        "cached": info.cached,
+        "repoId": info.repo_id
     }
 
 
@@ -458,84 +461,23 @@ async def start_model_download(model_name: str):
     Progress updates are sent via 'download-progress' event.
     Completion is signaled via 'download-complete' event.
     """
-    global _active_download_token, _download_thread
-
-    # Cancel any existing download
-    if _active_download_token and not _active_download_token.is_cancelled():
-        model_log.info("Cancelling previous download for new request")
-        _active_download_token.cancel()
-
-    # Check if already cached
-    manager = get_model_manager()
-    if manager.is_model_cached(model_name):
-        model_log.info("Model already cached", model=model_name)
-        # Send immediate completion
-        if _send_download_progress:
-            _send_download_progress("download-complete", {
-                "model": model_name,
-                "success": True,
-                "alreadyCached": True
-            })
-        return {"success": True, "alreadyCached": True}
-
-    # Create new cancel token
-    _active_download_token = CancelToken()
-
-    def do_download():
-        global _active_download_token
-
-        def on_progress(progress: DownloadProgress):
-            if _send_download_progress:
-                _send_download_progress("download-progress", {
-                    "model": progress.model_name,
-                    "percent": progress.percent,
-                    "downloadedBytes": progress.downloaded_bytes,
-                    "totalBytes": progress.total_bytes,
-                    "speedBps": progress.speed_bps,
-                    "etaSeconds": progress.eta_seconds
-                })
-
-        try:
-            success = manager.download_model(
-                model_name,
-                on_progress,
-                _active_download_token
-            )
-
-            if _send_download_progress:
-                _send_download_progress("download-complete", {
-                    "model": model_name,
-                    "success": success,
-                    "cancelled": _active_download_token.is_cancelled()
-                })
-        except Exception as e:
-            model_log.error("Download thread error", error=str(e))
-            if _send_download_progress:
-                _send_download_progress("download-complete", {
-                    "model": model_name,
-                    "success": False,
-                    "error": str(e)
-                })
-
-    # Start download in background thread
-    _download_thread = threading.Thread(target=do_download, daemon=True)
-    _download_thread.start()
-
-    model_log.info("Started model download", model=model_name)
-    return {"success": True, "started": True}
+    return get_model_manager().start_download(model_name, _emit_download_event)
 
 
 @server.method()
 async def cancel_model_download():
     """Cancel the current model download if any."""
-    global _active_download_token
+    return get_model_manager().cancel_download()
 
-    if _active_download_token and not _active_download_token.is_cancelled():
-        model_log.info("Cancelling model download")
-        _active_download_token.cancel()
-        return {"success": True, "cancelled": True}
 
-    return {"success": True, "cancelled": False}
+@server.method()
+async def get_download_status():
+    """Snapshot of the active model download, if any.
+
+    Lets a remounted UI re-attach to an in-flight download instead of
+    losing it when the settings page unmounts.
+    """
+    return get_model_manager().get_download_status()
 
 
 @server.method()

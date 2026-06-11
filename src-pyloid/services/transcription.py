@@ -7,7 +7,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 from services.logger import get_logger
-from services.model_manager import MODEL_REPOS
+from services.model_catalog import get_repo_id
 from services.gpu import resolve_device, get_compute_type
 
 log = get_logger("model")
@@ -30,11 +30,6 @@ class CancelToken:
 
 class TranscriptionCancelled(Exception):
     """Raised by long-running transcription when the cancel token is tripped."""
-
-
-def _get_repo_id(model_name: str) -> str:
-    """Get the HuggingFace repo ID for a model name."""
-    return MODEL_REPOS.get(model_name, f"Systran/faster-whisper-{model_name}")
 
 
 class TranscriptionService:
@@ -66,7 +61,7 @@ class TranscriptionService:
 
             self._loading = True
             try:
-                repo_id = _get_repo_id(model_name)
+                repo_id = get_repo_id(model_name)
                 log.info(
                     "Loading model",
                     model=model_name,
@@ -156,7 +151,7 @@ class TranscriptionService:
             if "not found or cannot be loaded" in str(e) and self._current_device == "cuda":
                 log.warning("CUDA runtime error during transcription, reloading on CPU", error=str(e))
                 model_name = self._current_model_name
-                repo_id = _get_repo_id(model_name)
+                repo_id = get_repo_id(model_name)
                 self._model = WhisperModel(repo_id, device="cpu", compute_type="int8")
                 self._current_device = "cpu"
                 self._current_compute_type = "int8"

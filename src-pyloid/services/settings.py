@@ -2,18 +2,7 @@ from dataclasses import dataclass, fields
 from typing import Optional
 from .database import DatabaseService
 from .hotkey import normalize_hotkey
-
-
-# Whisper model options - all models supported by faster-whisper
-# Order: multilingual models first, then English-only, then distilled
-WHISPER_MODELS = [
-    # Multilingual models (most commonly used)
-    "tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "turbo",
-    # English-only models (optimized for English)
-    "tiny.en", "base.en", "small.en", "medium.en",
-    # Distilled models (faster inference, English-only)
-    "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3",
-]
+from .model_catalog import WHISPER_MODELS
 
 # Supported languages (subset - full list at https://github.com/openai/whisper)
 WHISPER_LANGUAGES = [

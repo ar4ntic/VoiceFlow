@@ -15,6 +15,11 @@
     "build:installer:macos": "pnpm run build && bash installer/build-macos.sh",
     "lint": "eslint src",
     "typecheck": "tsc -b",
+    "test": "uv run -p .venv pytest src-pyloid/tests/ --ignore=src-pyloid/tests/test_transcription.py",
+    "test:all": "uv run -p .venv pytest src-pyloid/tests/",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run version:check",
+    "version:check": "node scripts/version.mjs check",
+    "version:bump": "node scripts/version.mjs bump",
     "setup": "pnpm install && uv venv && uv sync"
   },
   "dependencies": {

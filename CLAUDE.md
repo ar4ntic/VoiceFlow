@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VoiceFlow is a cross-platform voice-to-text paste utility built with Pyloid (Python desktop framework using PySide6/Qt WebEngine) and React. Users hold a hotkey to record audio, release to transcribe using faster-whisper, and the text is automatically pasted at the cursor. Supports Windows, Linux (Wayland/X11), and macOS.
 
+As of v1.6.0, VoiceFlow also ships a **Meeting Mode** — long-form recording with mic + system-loopback capture, async transcription, and LLM-generated summaries. This is a separate feature surface from the push-to-talk paste flow, kept self-contained under `services/recording/` so it can evolve (or be extracted) without touching PTT code.
+
 ## Commands
 
 ```bash
@@ -26,18 +28,34 @@ pnpm run build:installer          # Windows (.exe via Inno Setup)
 pnpm run build:installer:linux    # Linux (.tar.gz + .AppImage)
 pnpm run build:installer:macos    # macOS (.dmg)
 
-# Run Python tests
-cd VoiceFlow && uv run -p .venv pytest src-pyloid/tests/
+# Run Python tests (fast suite — excludes test_transcription, which downloads a model)
+pnpm run test
+pnpm run test:all                 # includes test_transcription
 
 # Run single test file
 uv run -p .venv pytest src-pyloid/tests/test_transcription.py -v
 
+# Everything CI runs (lint + typecheck + tests + version consistency)
+pnpm run check
+
+# Version bump — updates all five version files (package.json, voiceflow.iss,
+# pyproject.toml, constants.ts, uv.lock); never edit them by hand
+pnpm run version:bump X.Y.Z
+pnpm run version:check
+
 # Run frontend only (for UI development)
 pnpm run vite
 
-# Lint frontend
+# Lint / typecheck frontend
 pnpm run lint
+pnpm run typecheck
 ```
+
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, version check, and the fast
+test suite on every PR and push to main. The release workflow
+(`.github/workflows/release.yml`) additionally refuses tags that don't match
+package.json and verifies the Linux artifact's audio-library layout
+(bundled libasound/libportaudio removed, PyAV's av.libs copy intact).
 
 ## Architecture
 
@@ -46,8 +64,8 @@ pnpm run lint
 Python backend using Pyloid framework with PySide6:
 
 - **main.py** - Application entry point. Creates Pyloid app, tray icon, main dashboard window, and recording popup window. Sets up UI callbacks connecting backend events to popup state changes.
-- **server.py** - RPC server using `PyloidRPC`. Exposes methods (`get_settings`, `update_settings`, `get_history`, etc.) that frontend calls via `pyloid-js` RPC.
-- **app_controller.py** - Singleton controller orchestrating all services. Handles hotkey activate/deactivate flow: start recording -> stop recording -> transcribe -> paste at cursor -> save to history.
+- **server.py** - RPC server using `PyloidRPC`. Exposes PTT methods (`get_settings`, `update_settings`, `get_history`, etc.) plus the full Meeting Mode surface (`meetings.list_audio_sources`, `meetings.start`, `meetings.pause`, `meetings.resume`, `meetings.stop`, `meetings.transcribe`, `meetings.summarize`, `meetings.get_llm_config`, `meetings.test_llm_connection`, etc.) that frontend calls via `pyloid-js` RPC.
+- **app_controller.py** - Singleton controller orchestrating all services. Handles hotkey activate/deactivate flow: start recording -> stop recording -> transcribe -> paste at cursor -> save to history. Also constructs and owns the `MeetingsController` (exposed as `controller.meetings`) and runs an unfinished-recording recovery sweep on startup.
 
 **Services (src-pyloid/services/):**
 - `audio.py` - Microphone recording using sounddevice, streams amplitude for visualizer
@@ -56,21 +74,36 @@ Python backend using Pyloid framework with PySide6:
 - `clipboard.py` - Clipboard operations and paste-at-cursor using pyautogui
 - `settings.py` - Settings management with defaults
 - `database.py` - SQLite database for settings and history (stored at ~/.VoiceFlow/VoiceFlow.db)
-- `logger.py` - Domain-based logging with hybrid format `[timestamp] [LEVEL] [domain] message | {json}`. Supports domains: model, audio, hotkey, settings, database, clipboard, window. Configured with 100MB log rotation.
+- `logger.py` - Domain-based logging with hybrid format `[timestamp] [LEVEL] [domain] message | {json}`. Supports domains: model, audio, hotkey, settings, database, clipboard, window, plus Meeting-Mode domains (recording, transcribe, summary, llm). Configured with 100MB log rotation.
 - `model_manager.py` - Whisper model download/cache management using huggingface_hub. Provides download progress tracking (percent, speed, ETA), cancellation via CancelToken, daemon thread execution, and `clear_cache()` to delete only VoiceFlow's faster-whisper models.
+
+**Meeting Mode services (src-pyloid/services/recording/):**
+Self-contained per `docs/adr/0003-meeting-mode-isolation.md`; do not call these from the PTT path and vice versa.
+- `controller.py` - `MeetingsController` — the feature's facade. All RPC handlers go through this object. Emits `recording-state`, `meetings.transcribe-progress`, and `meetings.summarize-progress` events to the frontend via the emitter installed by `main.py`.
+- `recorder.py` - Long-form recorder with pause/resume, segmented WAV writing, and clock tracking. Sources are fixed at `start()` and cannot change mid-recording.
+- `audio_source.py` - Enumerates available mic + loopback devices for the UI device picker.
+- `loopback_linux.py` / `loopback_pulse.py` / `loopback_windows.py` - Platform-specific system-audio capture (PulseAudio/PipeWire on Linux, WASAPI loopback on Windows).
+- `clock.py` - Monotonic recording clock that survives pause/resume.
+- `llm.py` - LLM client with preset + custom-endpoint support; used by summary/title generation.
+- `summary.py` / `title.py` - LLM-driven summary and auto-title generation for finished recordings.
+- `secrets.py` - API-key storage for LLM providers (kept out of the main settings table).
+- `export.py` - Exports a recording's transcript/summary to text formats.
+- `recovery.py` - On startup, sweeps recordings left in `recording` / `paused` state from a previous (crashed) session and rolls them forward.
+- `audio_scheme.py` / `audio_scheme_handler.py` - Custom Qt `audio://` URL scheme so the WebEngine `<audio>` element can stream recording WAVs from disk without a server.
 
 ### Frontend (src/)
 
 React 18 + TypeScript + Vite frontend:
 
 - **App.tsx** - Hash-based routing between `/popup`, `/onboarding`, and `/dashboard`. Checks model cache on startup and shows recovery modal if model is missing.
-- **lib/api.ts** - RPC wrapper using `pyloid-js` to call Python backend methods. Includes model management APIs (`getModelInfo`, `startModelDownload`, `cancelModelDownload`).
-- **lib/types.ts** - TypeScript interfaces for Settings, HistoryEntry, Stats, Options, ModelInfo, DownloadProgress
-- **pages/** - Popup (recording indicator), Onboarding (includes model download step), Dashboard
+- **lib/api.ts** - RPC wrapper using `pyloid-js` to call Python backend methods. Includes model management APIs (`getModelInfo`, `startModelDownload`, `cancelModelDownload`) plus the full `recordings*` / meetings RPC surface.
+- **lib/types.ts** - TypeScript interfaces for Settings, HistoryEntry, Stats, Options, ModelInfo, DownloadProgress, plus meeting types: `Recording`, `RecordingSegment`, `RecorderState`, and LLM config types.
+- **pages/** - Popup (recording indicator), Onboarding (includes model download step), Dashboard. Dashboard uses React Router for sub-routes: `history`, `meetings`, `meetings/record`, `meetings/:id`, `settings`.
 - **components/** - Feature components plus shadcn/ui components in `components/ui/`
   - `ModelDownloadProgress.tsx` - Download progress UI with progress bar, speed, ETA, and retry support
   - `ModelDownloadModal.tsx` - Dialog wrapper for model downloads triggered from settings
   - `ModelRecoveryModal.tsx` - Startup modal for missing model recovery
+  - `meetings/` - Meeting Mode UI: `MeetingsListPage`, `MeetingRecorderPage`, `MeetingDetailPage`, `MeetingImportDialog`, `MeetingRecorderContext` (cross-route recorder state), `AudioPlayer`, `LevelMeter`, `StatusLine`, `TranscriptView`, `SummaryView`, `RetranscribeDialog`, `LLMSettingsSection`, `MeetingsSettingsSection`.
 
 ### Frontend-Backend Communication
 
@@ -123,6 +156,27 @@ For transparent popup windows on Windows:
 5. User can cancel via `cancelModelDownload()` which sets CancelToken
 6. On completion, model is cached in huggingface cache directory
 7. Turbo model uses `mobiuslabsgmbh/faster-whisper-large-v3-turbo` (same as faster-whisper internal mapping)
+
+### Meeting Mode (long-form recording)
+
+Separate from the PTT paste flow. Entrypoint: `controller.meetings` (`MeetingsController`). See `docs/adr/0001-stereo-channel-layout-for-recordings.md` for the on-disk audio layout decision.
+
+1. UI calls `meetings.list_audio_sources()` to populate the device picker (mic + loopback).
+2. `meetings.start(mic_device_id, loopback_device_id)` opens up to two simultaneous capture streams. Sources are fixed at start — they cannot be added/removed mid-recording.
+3. Audio is written to a WAV file under `~/.VoiceFlow/recordings/`:
+   - Two active sources → **stereo 16 kHz PCM16**, mic on **L**, loopback on **R** (kept separate on purpose; enables future speaker diarization with no ML — see ADR 0001).
+   - One active source → mono 16 kHz PCM16.
+4. `meetings.pause()` / `meetings.resume()` use a monotonic `Clock` to track real recording time; segments are stitched into one logical recording.
+5. `meetings.stop()` finalizes the WAV and persists metadata. Recording rows live in the same SQLite DB but in their own table.
+6. Transcription is **async and on-demand**: `meetings.transcribe(id)` runs faster-whisper in a daemon thread and emits `meetings.transcribe-progress` events. Long jobs do not block the RPC channel (see fix `dc04d29`).
+7. After transcription, `meetings.summarize(id, prompt)` calls the configured LLM provider (preset or custom endpoint) to produce an AI summary, and `title.py` auto-generates a title. LLM config and API keys live in `services/recording/llm.py` + `secrets.py`, not in the main `settings` table.
+8. Audio playback in the detail page uses a custom Qt `audio://` URL scheme (`audio_scheme.py`) so the WebEngine can stream the WAV directly without an HTTP server.
+9. On startup, `recovery.py` rolls forward any recordings left in `recording` / `paused` state from a crashed previous session.
+
+**Platform quirks**:
+- Linux loopback uses PulseAudio/PipeWire monitor sources (`loopback_pulse.py` / `loopback_linux.py`).
+- Windows loopback uses WASAPI. Must open the loopback stream at the device's native channel count (`max_output_channels`) — opening at a forced channel count fails on many devices (fixes `96b0b73`, `13d45be`).
+- Pyloid validates window IDs on every RPC roundtrip from a background thread; long-running meeting RPCs work around this (see `135fdd7`).
 
 ## Key Patterns
 

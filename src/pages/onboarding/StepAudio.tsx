@@ -54,7 +54,7 @@ export const StepAudio = ({
 
   const handleDeviceChange = async (backendDeviceId: string) => {
     const backendId = Number(backendDeviceId);
-    setMicrophone(backendId);
+    setIsListening(false);
     try {
       await api.stopTestRecording();
     } catch {
@@ -63,8 +63,10 @@ export const StepAudio = ({
     try {
       await api.updateSettings({ microphone: backendId });
       await api.startTestRecording();
+      setMicrophone(backendId);
       setIsListening(true);
     } catch (error) {
+      setIsListening(false);
       console.error("[Audio] Failed to restart recording:", error);
     }
   };

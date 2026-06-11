@@ -80,7 +80,7 @@ Python backend using Pyloid framework with PySide6:
 
 **Meeting Mode services (src-pyloid/services/recording/):**
 Self-contained per `docs/adr/0003-meeting-mode-isolation.md`; do not call these from the PTT path and vice versa.
-- `controller.py` - `MeetingsController` — the feature's facade. All RPC handlers go through this object. Emits `recording-state`, `meetings.transcribe-progress`, and `meetings.summarize-progress` events to the frontend via the emitter installed by `main.py`.
+- `controller.py` - `MeetingsController` — the feature's facade. All RPC handlers go through this object. Emits `recording-state`, `recording-transcribe-progress`, and `recording-summarize-progress` events to the frontend via the emitter installed by `main.py`.
 - `recorder.py` - Long-form recorder with pause/resume, segmented WAV writing, and clock tracking. Sources are fixed at `start()` and cannot change mid-recording.
 - `audio_source.py` - Enumerates available mic + loopback devices for the UI device picker.
 - `loopback_linux.py` / `loopback_pulse.py` / `loopback_windows.py` - Platform-specific system-audio capture (PulseAudio/PipeWire on Linux, WASAPI loopback on Windows).
@@ -169,7 +169,7 @@ Separate from the PTT paste flow. Entrypoint: `controller.meetings` (`MeetingsCo
    - One active source → mono 16 kHz PCM16.
 4. `meetings.pause()` / `meetings.resume()` use a monotonic `Clock` to track real recording time; segments are stitched into one logical recording.
 5. `meetings.stop()` finalizes the WAV and persists metadata. Recording rows live in the same SQLite DB but in their own table.
-6. Transcription is **async and on-demand**: `meetings.transcribe(id)` runs faster-whisper in a daemon thread and emits `meetings.transcribe-progress` events. Long jobs do not block the RPC channel (see fix `dc04d29`).
+6. Transcription is **async and on-demand**: `meetings.transcribe(id)` runs faster-whisper in a daemon thread and emits `recording-transcribe-progress` events. Long jobs do not block the RPC channel (see fix `dc04d29`).
 7. After transcription, `meetings.summarize(id, prompt)` calls the configured LLM provider (preset or custom endpoint) to produce an AI summary, and `title.py` auto-generates a title. LLM config and API keys live in `services/recording/llm.py` + `secrets.py`, not in the main `settings` table.
 8. Audio playback in the detail page uses a custom Qt `audio://` URL scheme (`audio_scheme.py`) so the WebEngine can stream the WAV directly without an HTTP server.
 9. On startup, `recovery.py` rolls forward any recordings left in `recording` / `paused` state from a crashed previous session.

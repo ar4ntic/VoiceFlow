@@ -4,6 +4,17 @@ import { Keyboard, Sparkles } from "lucide-react";
 // STEP: FINAL
 // ============================================================================
 
+// The default hold hotkey is `ctrl+win` on every platform (see settings.py),
+// but the Super key is labelled differently per OS — show the right one.
+const platform =
+  (navigator as unknown as { userAgentData?: { platform: string } }).userAgentData
+    ?.platform ?? navigator.userAgent;
+const superKeyLabel = /Mac/i.test(platform)
+  ? "⌘"
+  : /Linux/i.test(platform)
+    ? "Super"
+    : "Win";
+
 export const StepFinal = () => (
   <div className="space-y-5 max-w-lg w-full">
     <div className="border border-border rounded-md bg-surface p-8 space-y-5">
@@ -18,7 +29,7 @@ export const StepFinal = () => (
           </kbd>
           <span className="text-base text-cream-muted/40 font-mono">+</span>
           <kbd className="min-w-[72px] py-2.5 rounded-md bg-secondary border border-border text-base font-mono font-medium text-cream">
-            Win
+            {superKeyLabel}
           </kbd>
         </div>
         <p className="text-sm text-cream-muted">

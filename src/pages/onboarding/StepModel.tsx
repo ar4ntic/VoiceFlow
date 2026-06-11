@@ -73,6 +73,13 @@ export const StepModel = ({
     if (isEnglishOnlyModel(modelId) && language !== "en") setLanguage("en");
   };
 
+  const handleLanguageChange = (nextLanguage: string) => {
+    // English-only models can't transcribe other languages — keep "en" locked
+    // in while one is selected.
+    if (isEnglishOnlyModel(model) && nextLanguage !== "en") return;
+    setLanguage(nextLanguage);
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-6 w-full max-w-6xl h-full min-h-0">
       <div className="space-y-5 min-w-0 overflow-y-auto pr-2">
@@ -80,7 +87,7 @@ export const StepModel = ({
           <p className="font-mono text-[10px] uppercase tracking-[0.25em] text-cream-muted/60 mb-2">
             language
           </p>
-          <Select value={language} onValueChange={setLanguage}>
+          <Select value={language} onValueChange={handleLanguageChange}>
             <SelectTrigger className="h-10 bg-secondary/40 border-border hover:bg-secondary/60 transition-colors rounded-md max-w-sm">
               <SelectValue />
             </SelectTrigger>

@@ -76,6 +76,7 @@ export function useModelDownload(
       const result = await api.startModelDownload(modelName);
       if (result.alreadyCached) {
         setState("completed");
+        onComplete?.(true);
       } else {
         setState("downloading");
         onStart?.();

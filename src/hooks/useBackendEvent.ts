@@ -15,7 +15,8 @@ export function useBackendEvent<T>(name: string, handler: (detail: T) => void) {
 
   useEffect(() => {
     const listener = (event: Event) => {
-      handlerRef.current((event as CustomEvent<T>).detail);
+      if (!(event instanceof CustomEvent)) return;
+      handlerRef.current(event.detail as T);
     };
     document.addEventListener(name, listener);
     return () => document.removeEventListener(name, listener);

@@ -21,6 +21,9 @@ export function useAudioSourcePreview(
   useEffect(() => {
     if (isLive) {
       activeKey.current = "";
+      api.recordingsPreviewStop().catch(() => {});
+      setMicPeakDb(null);
+      setLoopbackPeakDb(null);
       return;
     }
     const key = `${micId || "-"}|${loopId || "-"}`;
@@ -87,6 +90,7 @@ export function useAudioSourcePreview(
 
   const clear = useCallback(() => {
     activeKey.current = "";
+    api.recordingsPreviewStop().catch(() => {});
     setMicPeakDb(null);
     setLoopbackPeakDb(null);
   }, []);

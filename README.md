@@ -73,13 +73,13 @@ Recording, transcription, search, and storage stay local. The only network call 
 
 ## VoiceFlow vs cloud dictation
 
-|  | VoiceFlow | Cloud services |
-| :--- | :--- | :--- |
-| Cost | $0 | ~$10–15/month |
-| Where audio goes | Your RAM | Their servers |
-| Works offline | Yes | No |
-| Account required | No | Yes |
-| License | MIT | Closed |
+|                  | VoiceFlow | Cloud services |
+| :--------------- | :-------- | :------------- |
+| Cost             | $0        | ~$10–15/month  |
+| Where audio goes | Your RAM  | Their servers  |
+| Works offline    | Yes       | No             |
+| Account required | No        | Yes            |
+| License          | MIT       | Closed         |
 
 ## Install
 
@@ -111,17 +111,18 @@ Platform installers (run on the matching OS):
 ```bash
 pnpm run build:installer          # Windows (.exe via Inno Setup)
 pnpm run build:installer:linux    # Linux (.AppImage and .tar.gz)
-pnpm run build:installer:macos    # macOS (.dmg)
+pnpm run build:installer:macos           # macOS signed/notarized release DMG
+pnpm run build:installer:macos:unsigned  # macOS local smoke DMG
 ```
 
 ## Stack
 
-| Layer | Tech |
-| :--- | :--- |
-| Shell | [Pyloid](https://github.com/pyloid/pyloid) (PySide6 + Qt WebEngine) |
+| Layer     | Tech                                                                      |
+| :-------- | :------------------------------------------------------------------------ |
+| Shell     | [Pyloid](https://github.com/pyloid/pyloid) (PySide6 + Qt WebEngine)       |
 | Inference | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) |
-| Frontend | React 18, Vite, Tailwind v4, shadcn/ui |
-| Storage | SQLite at `~/.VoiceFlow/VoiceFlow.db` |
+| Frontend  | React 18, Vite, Tailwind v4, shadcn/ui                                    |
+| Storage   | SQLite at `~/.VoiceFlow/VoiceFlow.db`                                     |
 
 ## License
 

@@ -13,6 +13,7 @@
     "build:installer": "pnpm run build && cd installer && build-installer.bat",
     "build:installer:linux": "pnpm run build && bash installer/build-linux.sh",
     "build:installer:macos": "pnpm run build && bash installer/build-macos.sh",
+    "build:installer:macos:unsigned": "pnpm run build && bash installer/build-macos.sh --unsigned",
     "lint": "eslint src",
     "typecheck": "tsc -b",
     "test": "uv run -p .venv pytest src-pyloid/tests/ --ignore=src-pyloid/tests/test_transcription.py",

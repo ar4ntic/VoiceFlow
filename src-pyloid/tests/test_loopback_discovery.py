@@ -10,6 +10,10 @@ output — tests target the private function with fixture data.
 import pytest
 
 from services.recording.loopback_linux import _filter_linux_loopback
+from services.recording.loopback_macos import (
+    MACOS_SCREENCAPTUREKIT_ID,
+    list_macos_loopback_sources,
+)
 from services.recording.loopback_windows import _filter_wasapi_loopback
 
 
@@ -142,3 +146,25 @@ class TestWindowsWasapiFilter:
         d = result[0]
         for key in ("id", "name", "kind", "hostApi", "isDefault"):
             assert key in d
+
+
+class TestMacOSLoopbackFilter:
+    def test_screencapturekit_source_only_on_darwin(self, monkeypatch):
+        monkeypatch.setattr("services.recording.loopback_macos.sys.platform", "darwin")
+
+        result = list_macos_loopback_sources()
+
+        assert result == [
+            {
+                "id": MACOS_SCREENCAPTUREKIT_ID,
+                "name": "System audio",
+                "kind": "loopback",
+                "hostApi": "ScreenCaptureKit",
+                "isDefault": True,
+            }
+        ]
+
+    def test_screencapturekit_source_hidden_off_darwin(self, monkeypatch):
+        monkeypatch.setattr("services.recording.loopback_macos.sys.platform", "linux")
+
+        assert list_macos_loopback_sources() == []

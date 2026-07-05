@@ -32,7 +32,6 @@ from services.recording.loopback import LoopbackDiscovery
 from services.recording.recorder import (
     NoAudioSourcesError,
     RecorderAlreadyStartedError,
-    RecorderNotRunningError,
     RecordingService,
     SAMPLE_RATE,
 )
@@ -50,6 +49,7 @@ from services.settings import (
     LLM_PRESETS,
     SettingsService,
 )
+from services.macos_permissions import get_macos_permission_snapshot, is_macos
 from services.transcription import (
     CancelToken,
     TranscriptionCancelled,
@@ -267,17 +267,24 @@ class MeetingsController:
     def list_audio_sources(self) -> dict:
         """Enumerate available mic + loopback devices. Backend uses sounddevice
         which is platform-aware on import."""
+        permissions = get_macos_permission_snapshot() if is_macos() else None
         try:
             import sounddevice as sd
         except Exception:
-            return {"mic": [], "loopback": []}
+            result = {"mic": [], "loopback": []}
+            if permissions is not None:
+                result["permissions"] = permissions
+            return result
 
         try:
             devs = [{**dict(d), "index": i} for i, d in enumerate(sd.query_devices())]
             apis = [dict(a) for a in sd.query_hostapis()]
         except Exception as exc:
             log.warning("query_devices failed", error=str(exc))
-            return {"mic": [], "loopback": []}
+            result = {"mic": [], "loopback": []}
+            if permissions is not None:
+                result["permissions"] = permissions
+            return result
 
         loopback = self._loopback.list_sources(devs, apis)
         loopback_ids = {item["id"] for item in loopback}
@@ -303,7 +310,10 @@ class MeetingsController:
                 "isDefault": d.get("index") == default_in,
             })
 
-        return {"mic": mics, "loopback": loopback}
+        result = {"mic": mics, "loopback": loopback}
+        if permissions is not None:
+            result["permissions"] = permissions
+        return result
 
     # -------------------------------------------------------------- recording
 
@@ -403,8 +413,11 @@ class MeetingsController:
                 mic=mic_source,
                 loopback=loop_source,
             )
-        except (RecorderAlreadyStartedError, RecorderNotRunningError, NoAudioSourcesError):
-            self.repo.delete_recording(recording_id)
+        except RecorderAlreadyStartedError:
+            self._delete_transient_start_artifacts(recording_id, wav_abs)
+            raise
+        except Exception:
+            self._delete_failed_start(recording_id, wav_abs)
             raise
 
         self.repo.set_recording_recorder_state(recording_id, "recording")
@@ -427,6 +440,21 @@ class MeetingsController:
 
     def _build_loopback_source(self, device_id: Optional[int]):
         return self._loopback.build_source(device_id)
+
+    def _delete_transient_start_artifacts(self, recording_id: int, wav_abs: Path) -> None:
+        try:
+            self.repo.delete_recording(recording_id)
+        except Exception:
+            log.exception("failed to delete unsaved recording row", recording_id=recording_id)
+        try:
+            wav_abs.unlink(missing_ok=True)
+        except OSError:
+            log.exception("failed to delete partial recording file", path=str(wav_abs))
+
+    def _delete_failed_start(self, recording_id: int, wav_abs: Path) -> None:
+        self._delete_transient_start_artifacts(recording_id, wav_abs)
+        self._stop_tick()
+        self._emit_meeting_state("idle", duration_ms=0)
 
     # -------------------------------------------------------------- pre-record preview
 

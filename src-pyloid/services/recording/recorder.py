@@ -125,6 +125,10 @@ class RecordingService:
             self._pause_started_at = None
             self._stop_writer = False
             self._wake.clear()
+            self._mic_peak_db = None
+            self._loopback_peak_db = None
+            self._last_mic_frame_at = None
+            self._last_loopback_frame_at = None
 
             self._file = sf.SoundFile(
                 str(self._file_path),
@@ -136,13 +140,20 @@ class RecordingService:
             self._state = "recording"
 
         # Start sources outside the lock — their `start` might call back synchronously.
-        if mic is not None:
-            mic.start(self._on_mic_frames)
-        if loopback is not None:
-            loopback.start(self._on_loopback_frames)
+        started: list[AudioSource] = []
+        try:
+            if mic is not None:
+                mic.start(self._on_mic_frames)
+                started.append(mic)
+            if loopback is not None:
+                loopback.start(self._on_loopback_frames)
+                started.append(loopback)
 
-        self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
-        self._writer_thread.start()
+            self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
+            self._writer_thread.start()
+        except Exception:
+            self._cleanup_failed_start(started)
+            raise
 
     def pause(self) -> None:
         with self._lock:
@@ -212,6 +223,51 @@ class RecordingService:
             "duration_ms": int(frames_written * 1000 / SAMPLE_RATE),
             "size_bytes": size_bytes,
         }
+
+    def _cleanup_failed_start(self, started: list[AudioSource]) -> None:
+        for source in reversed(started):
+            try:
+                source.stop()
+            except Exception:
+                log.exception("source stop failed during start cleanup")
+
+        with self._lock:
+            self._stop_writer = True
+        self._wake.set()
+        if self._writer_thread is not None:
+            self._writer_thread.join(timeout=2.0)
+
+        file_path = self._file_path
+        if self._file is not None:
+            try:
+                self._file.close()
+            except Exception:
+                log.exception("recording file close failed during start cleanup")
+
+        if file_path is not None:
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError:
+                log.exception("partial recording delete failed", path=str(file_path))
+
+        with self._lock:
+            self._state = "idle"
+            self._mic = None
+            self._loopback = None
+            self._file = None
+            self._file_path = None
+            self._recording_id = None
+            self._writer_thread = None
+            self._stop_writer = False
+            self._mic_queue.clear()
+            self._loopback_queue.clear()
+            self._silence_frames_pending = 0
+            self._pause_started_at = None
+            self._frames_written = 0
+            self._mic_peak_db = None
+            self._loopback_peak_db = None
+            self._last_mic_frame_at = None
+            self._last_loopback_frame_at = None
 
     def get_state(self) -> dict:
         with self._lock:

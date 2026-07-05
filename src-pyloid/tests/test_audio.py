@@ -79,6 +79,42 @@ class TestAudioService:
         # Cleanup
         service.stop_recording()
 
+    def test_start_failure_does_not_leave_recording_state(self, monkeypatch):
+        """Input stream construction failure keeps service state idle."""
+        service = AudioService()
+
+        def _raise(*_args, **_kwargs):
+            raise RuntimeError("input unavailable")
+
+        monkeypatch.setattr("services.audio.sd.InputStream", _raise)
+
+        with pytest.raises(RuntimeError, match="input unavailable"):
+            service.start_recording()
+
+        assert service.is_recording() is False
+        assert service._stream is None
+
+    def test_stream_start_failure_closes_partial_stream(self, monkeypatch):
+        """Input stream start failure closes the stream and keeps state idle."""
+        service = AudioService()
+        closed = []
+
+        class _Stream:
+            def start(self):
+                raise RuntimeError("start denied")
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr("services.audio.sd.InputStream", lambda **_kwargs: _Stream())
+
+        with pytest.raises(RuntimeError, match="start denied"):
+            service.start_recording()
+
+        assert service.is_recording() is False
+        assert service._stream is None
+        assert closed == [True]
+
     def test_sample_rate_is_16khz(self):
         """Audio is recorded at 16kHz for Whisper compatibility.
 

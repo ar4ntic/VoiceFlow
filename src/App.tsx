@@ -7,6 +7,8 @@ import { Popup } from "@/pages/Popup";
 import { Toaster } from "@/components/ui/sonner";
 import { ModelRecoveryModal } from "@/components/ModelRecoveryModal";
 import type { Settings } from "@/lib/types";
+import { useBackendEvent } from "@/hooks/useBackendEvent";
+import { toast } from "sonner";
 
 // Detect Linux platform and add reduced-effects class
 // Qt WebEngine on Linux often falls back to software rendering,
@@ -133,8 +135,17 @@ function AppRouter() {
 export default function App() {
   return (
     <HashRouter>
+      <BackendErrorToast />
       <AppRouter />
       <Toaster position="bottom-right" />
     </HashRouter>
   );
+}
+
+function BackendErrorToast() {
+  useBackendEvent<{ message?: string }>("app-error", (detail) => {
+    const message = detail?.message || "VoiceFlow could not complete that action.";
+    toast.error(message);
+  });
+  return null;
 }

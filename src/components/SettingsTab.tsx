@@ -50,6 +50,11 @@ const THEME_ICONS: Record<string, React.ElementType> = {
   system: Monitor,
 };
 
+const IS_MAC =
+  ((navigator as unknown as { userAgentData?: { platform: string } }).userAgentData?.platform ??
+    navigator.platform ??
+    navigator.userAgent).includes("Mac");
+
 const SECTIONS = [
   { id: "transcription", num: "01", label: "transcription" },
   { id: "behavior",      num: "02", label: "behavior" },
@@ -341,7 +346,11 @@ export function SettingsTab() {
 
           <SectionBlock
             label="Compute device"
-            helper="CPU is reliable everywhere. CUDA needs an NVIDIA GPU and cuDNN 9.x."
+            helper={
+              IS_MAC
+                ? "macOS currently uses CPU for Whisper. CUDA acceleration is available only on supported NVIDIA systems."
+                : "CPU is reliable everywhere. CUDA needs an NVIDIA GPU and cuDNN 9.x."
+            }
           >
             <ComputePanel
               value={settings.device}

@@ -1,5 +1,13 @@
 import pytest
-from services.hotkey import HotkeyService, normalize_hotkey, validate_hotkey, are_hotkeys_conflicting
+import sys
+import types
+from services.hotkey import (
+    HotkeyService,
+    normalize_hotkey,
+    validate_hotkey,
+    are_hotkeys_conflicting,
+    _pynput_key_to_name,
+)
 
 
 class TestNormalizeHotkey:
@@ -122,6 +130,74 @@ class TestAreHotkeysConflicting:
         assert are_hotkeys_conflicting("ctrl+win", "ctrl+windows") is True
 
 
+class TestPynputKeyMapping:
+    @pytest.fixture
+    def fake_pynput(self, monkeypatch):
+        class Key:
+            pass
+
+        for name in (
+            "cmd",
+            "cmd_l",
+            "cmd_r",
+            "ctrl",
+            "ctrl_l",
+            "ctrl_r",
+            "alt",
+            "alt_l",
+            "alt_r",
+            "alt_gr",
+            "shift",
+            "shift_l",
+            "shift_r",
+            "space",
+            "enter",
+            "return_key",
+            "esc",
+            "tab",
+            "backspace",
+            "delete",
+            "up",
+            "down",
+            "left",
+            "right",
+        ):
+            setattr(Key, name, Key())
+        for index in range(1, 13):
+            setattr(Key, f"f{index}", Key())
+        Key.enter = Key.return_key
+
+        class KeyCode:
+            def __init__(self, char=None):
+                self.char = char
+
+            @classmethod
+            def from_char(cls, char):
+                return cls(char)
+
+        keyboard_module = types.ModuleType("pynput.keyboard")
+        keyboard_module.Key = Key
+        keyboard_module.KeyCode = KeyCode
+        pynput_module = types.ModuleType("pynput")
+        pynput_module.keyboard = keyboard_module
+
+        monkeypatch.setitem(sys.modules, "pynput", pynput_module)
+        monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard_module)
+        return Key, KeyCode
+
+    def test_maps_command_to_win(self, fake_pynput):
+        Key, _ = fake_pynput
+        assert _pynput_key_to_name(Key.cmd) == 'win'
+
+    def test_maps_character_keys(self, fake_pynput):
+        _, KeyCode = fake_pynput
+        assert _pynput_key_to_name(KeyCode.from_char('R')) == 'r'
+
+    def test_maps_ctrl_modifier(self, fake_pynput):
+        Key, _ = fake_pynput
+        assert _pynput_key_to_name(Key.ctrl_l) == 'ctrl'
+
+
 class TestHotkeyService:
     def test_initial_state_not_running(self):
         """Hotkey service starts in non-running state."""
@@ -182,6 +258,17 @@ class TestHotkeyService:
             on_activate=on_activate,
             on_deactivate=on_deactivate,
         )
+
+    def test_activation_callback_can_reject_start(self):
+        service = HotkeyService()
+        service.set_callbacks(
+            on_activate=lambda: False,
+            on_deactivate=lambda: None,
+        )
+
+        service._on_hold_press()
+
+        assert service.is_recording() is False
 
     def test_callbacks_are_optional(self):
         """Service works without callbacks set."""

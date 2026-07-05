@@ -17,8 +17,16 @@ means editing this module only.
 
 from typing import Optional
 
-from services.recording.audio_source import ParecAudioSource, SoundDeviceAudioSource
+from services.recording.audio_source import (
+    ParecAudioSource,
+    ScreenCaptureKitAudioSource,
+    SoundDeviceAudioSource,
+)
 from services.recording.loopback_linux import _filter_linux_loopback
+from services.recording.loopback_macos import (
+    MACOS_SCREENCAPTUREKIT_ID,
+    list_macos_loopback_sources,
+)
 from services.recording.loopback_pulse import list_pulse_monitor_sources
 from services.recording.loopback_windows import _filter_wasapi_loopback
 
@@ -44,7 +52,11 @@ class LoopbackDiscovery:
         The PortAudio filters are conservative — they won't double-list
         anything that doesn't look like loopback — so running both platform
         filters unconditionally is safe."""
-        loopback = _filter_linux_loopback(devs, apis) + _filter_wasapi_loopback(devs, apis)
+        loopback = (
+            _filter_linux_loopback(devs, apis)
+            + _filter_wasapi_loopback(devs, apis)
+            + list_macos_loopback_sources()
+        )
 
         self._pulse_monitor_by_id = {}
         for entry in list_pulse_monitor_sources():
@@ -63,6 +75,8 @@ class LoopbackDiscovery:
         None passes through (source not picked)."""
         if device_id is None:
             return None
+        if device_id == MACOS_SCREENCAPTUREKIT_ID:
+            return ScreenCaptureKitAudioSource()
         # Route PipeWire monitor sources through parec instead of PortAudio.
         pulse_name = self._pulse_monitor_by_id.get(device_id)
         if pulse_name is not None:

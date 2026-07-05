@@ -167,16 +167,24 @@ class AppController:
             warning(f"Shutdown: failed to stop active meeting: {exc}")
         self.transcription_service.unload_model()
 
-    def _handle_hotkey_activate(self):
+    def _handle_hotkey_activate(self) -> bool:
         """Called when hotkey is pressed."""
         # Don't activate during onboarding
         if not self._popup_enabled:
             debug("Hotkey ignored - popup disabled (onboarding)")
-            return
+            return False
+
+        try:
+            self.audio_service.start_recording()
+        except Exception as exc:
+            exception(f"Recording could not start: {exc}")
+            if self._on_error:
+                self._on_error(_recording_start_error_message(exc))
+            return False
 
         if self._on_recording_start:
             self._on_recording_start()
-        self.audio_service.start_recording()
+        return True
 
     def _handle_hotkey_deactivate(self):
         """Called when hotkey is released."""
@@ -363,7 +371,11 @@ class AppController:
     def start_test_recording(self):
         """Start recording for onboarding test (no hotkey needed)."""
         debug("Starting test recording")
-        self.audio_service.start_recording()
+        try:
+            self.audio_service.start_recording()
+        except Exception as exc:
+            exception(f"Test recording could not start: {exc}")
+            raise RuntimeError(_recording_start_error_message(exc)) from exc
 
     def stop_test_recording(self) -> dict:
         """Stop test recording, transcribe, and return result (no paste/history)."""
@@ -412,6 +424,13 @@ class AppController:
                                  stderr=subprocess.DEVNULL)
         except Exception as e:
             error(f"Failed to open data folder: {e}")
+
+    def open_macos_privacy_settings(self, pane: str) -> dict:
+        """Open a macOS Privacy & Security pane."""
+        from services.macos_permissions import open_privacy_settings
+
+        ok = open_privacy_settings(pane)
+        return {"success": ok}
 
     def set_popup_enabled(self, enabled: bool):
         """Enable or disable the popup/hotkey functionality."""
@@ -463,3 +482,13 @@ def get_controller() -> AppController:
     if _controller is None:
         _controller = AppController()
     return _controller
+
+
+def _recording_start_error_message(exc: Exception) -> str:
+    text = str(exc) or exc.__class__.__name__
+    if "permission" in text.lower() or "access" in text.lower():
+        return (
+            "VoiceFlow could not access the microphone. Check the microphone "
+            "permission and selected input device, then try again."
+        )
+    return f"VoiceFlow could not start recording: {text}"

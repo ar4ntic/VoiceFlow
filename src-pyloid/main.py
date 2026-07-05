@@ -1,5 +1,42 @@
 import sys
 import os
+import multiprocessing
+
+# Redirect multiprocessing worker/resource_tracker subprocesses before Qt imports.
+# Frozen helpers must not initialize the desktop app again.
+multiprocessing.freeze_support()
+
+# macOS single-instance lock must be acquired before Qt/PySide imports so a
+# second launch while the first is still starting cannot spawn another GUI.
+_instance_lock_file = None
+
+
+def _acquire_macos_instance_lock() -> bool:
+    """Return False if another VoiceFlow instance already holds the lock."""
+    global _instance_lock_file
+    if sys.platform != 'darwin':
+        return True
+
+    import fcntl
+    from pathlib import Path
+
+    lock_path = Path.home() / '.VoiceFlow' / '.instance.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, 'w')
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return False
+
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _instance_lock_file = handle
+    return True
+
+
+if not _acquire_macos_instance_lock():
+    sys.exit(0)
 
 # ============================================================================
 # Linux: Preload CUDA libraries from nvidia pip packages before any CUDA imports
@@ -149,18 +186,22 @@ def init_signals():
 
 
 # ============================================================================
-# Single Instance Check (Issue #4: Multiple tray icons)
+# Single Instance Check
 # ============================================================================
-# Windows mutex-based single instance check as backup to Pyloid's single_instance
-# This prevents multiple tray icons when Pyloid's check fails or app crashes
+# Windows mutex-based single instance check as backup to Pyloid's single_instance.
+# macOS uses an early flock in _acquire_macos_instance_lock() before Qt imports.
 _instance_mutex = None
 
 def ensure_single_instance():
-    """Ensure only one instance of VoiceFlow runs at a time using Windows mutex."""
+    """Ensure only one instance of VoiceFlow runs at a time."""
     global _instance_mutex
 
+    if sys.platform == 'darwin':
+        # Already enforced before Qt imports; keep Pyloid path clear.
+        return True
+
     if sys.platform != 'win32':
-        return True  # Only implement Windows mutex for now
+        return True
 
     try:
         import ctypes
@@ -613,6 +654,20 @@ def on_amplitude(amp: float):
         _bridge.emit_event("ptt-amplitude", amp)
 
 
+def _on_error_slot(message: str):
+    """Slot: user-facing backend error handler."""
+    log.warning("Backend error", message=message)
+    resize_popup(POPUP_IDLE_WIDTH, POPUP_IDLE_HEIGHT)
+    send_popup_event('popup-state', {'state': 'idle'})
+    send_main_window_event('app-error', {'message': message})
+
+
+def on_error(message: str):
+    """Called from worker threads - routes to main Qt thread via the bridge."""
+    if _bridge:
+        _bridge.emit_event("ptt-error", message)
+
+
 def on_onboarding_complete():
     """Called when user completes onboarding - hide main window, show popup."""
     global window
@@ -688,6 +743,7 @@ _bridge.on("ptt-recording-start", lambda _payload: _on_recording_start_slot())
 _bridge.on("ptt-recording-stop", lambda _payload: _on_recording_stop_slot())
 _bridge.on("ptt-transcription-complete", _on_transcription_complete_slot)
 _bridge.on("ptt-amplitude", _on_amplitude_slot)
+_bridge.on("ptt-error", _on_error_slot)
 # Meeting recorder state — drives the popup's "MEETING" pill. Other meetings
 # events (transcribe/summarize progress) have no popup handler and are
 # dropped by the bridge; the dashboard gets meeting state via its own poll
@@ -700,6 +756,7 @@ controller.set_ui_callbacks(
     on_recording_stop=on_recording_stop,
     on_transcription_complete=on_transcription_complete,
     on_amplitude=on_amplitude,
+    on_error=on_error,
 )
 
 # Route ALL meeting recorder events through the bridge; only handled names

@@ -9,7 +9,15 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Mic, Monitor, Pause, Play, Square } from "lucide-react";
+import {
+  ArrowLeft,
+  ExternalLink,
+  Mic,
+  Monitor,
+  Pause,
+  Play,
+  Square,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,7 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import type { AudioSource } from "@/lib/types";
+import type { AudioSource, AudioSourceList, MacOSPermissionSnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { LevelMeter } from "./LevelMeter";
 import { useMeetingRecorder } from "./MeetingRecorderContext";
@@ -35,10 +43,10 @@ export function MeetingRecorderPage() {
   const recorder = useMeetingRecorder();
   const isLive = recorder.isLive;
 
-  const [sources, setSources] = useState<{
-    mic: AudioSource[];
-    loopback: AudioSource[];
-  }>({ mic: [], loopback: [] });
+  const [sources, setSources] = useState<AudioSourceList>({
+    mic: [],
+    loopback: [],
+  });
   const [title, setTitle] = useState(defaultTitle());
   const [micId, setMicId] = useState<string>("");
   const [loopId, setLoopId] = useState<string>("");
@@ -57,8 +65,12 @@ export function MeetingRecorderPage() {
         if (cancelled) return;
         setSources(list);
         const defaultMic = list.mic.find((s) => s.isDefault) ?? list.mic[0];
-        const defaultLoop =
-          list.loopback.find((s) => s.isDefault) ?? list.loopback[0];
+        const canDefaultLoopback =
+          list.permissions?.screenRecording == null ||
+          list.permissions.screenRecording === "granted";
+        const defaultLoop = canDefaultLoopback
+          ? list.loopback.find((s) => s.isDefault) ?? list.loopback[0]
+          : undefined;
         if (defaultMic) setMicId(String(defaultMic.id));
         if (defaultLoop) setLoopId(String(defaultLoop.id));
       } catch (err) {
@@ -88,7 +100,7 @@ export function MeetingRecorderPage() {
       await recorder.refresh();
     } catch (err) {
       console.error("start failed", err);
-      toast.error("Could not start recording");
+      toast.error(messageFromError(err, "Could not start recording"));
     } finally {
       setStarting(false);
     }
@@ -146,6 +158,7 @@ export function MeetingRecorderPage() {
             title={title}
             onTitle={setTitle}
             sources={sources}
+            permissions={sources.permissions}
             loadingSources={loadingSources}
             micId={micId}
             onMic={setMicId}
@@ -168,6 +181,7 @@ function PreRecordForm(props: {
   title: string;
   onTitle(v: string): void;
   sources: { mic: AudioSource[]; loopback: AudioSource[] };
+  permissions?: MacOSPermissionSnapshot;
   loadingSources: boolean;
   micId: string;
   onMic(v: string): void;
@@ -179,6 +193,10 @@ function PreRecordForm(props: {
   starting: boolean;
 }) {
   const canStart = props.micId !== "" || props.loopId !== "";
+  const screenRecordingStatus = props.permissions?.screenRecording;
+  const macOSSystemAudioAvailable = props.sources.loopback.some(
+    (source) => source.hostApi === "ScreenCaptureKit",
+  );
   return (
     <>
       <header className="space-y-3">
@@ -223,7 +241,11 @@ function PreRecordForm(props: {
         <SourceRow
           label="System audio"
           icon={Monitor}
-          helper="The other side of a Teams / Meet / Zoom call. Captured via loopback."
+          helper={
+            macOSSystemAudioAvailable
+              ? "The other side of a Teams / Meet / Zoom call. On macOS this uses Screen Recording permission."
+              : "The other side of a Teams / Meet / Zoom call. Captured via loopback."
+          }
           options={props.sources.loopback}
           value={props.loopId}
           onChange={props.onLoop}
@@ -235,6 +257,22 @@ function PreRecordForm(props: {
           }
           previewDb={props.previewLoopDb}
         />
+        {macOSSystemAudioAvailable && screenRecordingStatus !== "granted" && (
+          <div className="py-4 border-t border-border flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-8">
+            <p className="text-xs text-amber-500/90 leading-relaxed max-w-xl">
+              Screen Recording permission is required for macOS system audio.
+              You can still record microphone-only while it is missing.
+            </p>
+            <button
+              type="button"
+              onClick={() => api.openMacOSPrivacySettings("screen_recording")}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-500 hover:text-amber-400"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Open System Settings
+            </button>
+          </div>
+        )}
       </section>
 
       <div className="pt-6 border-t border-border flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -387,6 +425,16 @@ function SourcePreviewBar({ peakDb }: { peakDb: number | null }) {
       </span>
     </div>
   );
+}
+
+function messageFromError(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  if (typeof err === "string" && err) {
+    return err;
+  }
+  return fallback;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

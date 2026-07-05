@@ -311,6 +311,13 @@ async def open_data_folder():
 
 
 @server.method()
+async def open_macos_privacy_settings(pane: str):
+    """Open a macOS Privacy & Security pane."""
+    controller = get_controller()
+    return controller.open_macos_privacy_settings(pane)
+
+
+@server.method()
 async def open_external_url(url: str):
     """Open a URL in the system's default browser.
 

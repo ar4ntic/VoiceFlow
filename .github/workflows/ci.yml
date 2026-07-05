@@ -130,3 +130,56 @@ jobs:
             exit 1
           fi
           echo "Build OK: $(du -sh dist/VoiceFlow | cut -f1) bundle, all shared libraries resolved."
+
+  build-macos-smoke:
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'uv.lock'
+
+      - name: Setup Python environment
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12 .venv
+          uv sync
+
+      - name: Build unsigned macOS app
+        run: pnpm run build
+
+      - name: Build unsigned DMG
+        run: bash installer/build-macos.sh --unsigned
+
+      - name: Smoke test macOS bundle
+        run: |
+          PLIST="./dist/VoiceFlow.app/Contents/Info.plist"
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST")
+          test -d ./dist/VoiceFlow.app
+          test -f "./dist/VoiceFlow.app/Contents/MacOS/$EXEC"
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST" >/dev/null
+          /usr/libexec/PlistBuddy -c "Print :NSScreenCaptureUsageDescription" "$PLIST" >/dev/null
+          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$PLIST" | grep -qx "13.0"
+          file "./dist/VoiceFlow.app/Contents/MacOS/$EXEC" | grep -q "arm64"
+          test -f ./dist/installer/VoiceFlow-*-macos-arm64-unsigned.dmg
+
+      - name: Backend tests
+        run: uv run -p .venv pytest src-pyloid/tests/ -q --ignore=src-pyloid/tests/test_transcription.py

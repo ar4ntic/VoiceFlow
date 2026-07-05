@@ -15,20 +15,19 @@
 </p>
 
 <p align="center">
-  Local Whisper dictation for Windows and Linux. No account, no cloud, no monthly bill.
-  <br/>
-  <sub>macOS builds and runs but isn't officially supported yet.</sub>
+  Local Whisper dictation for Windows, Linux, and Apple Silicon macOS 13+. No account, no cloud, no monthly bill.
 </p>
 
 <p align="center">
-  <a href="https://github.com/infiniV/VoiceFlow/releases/tag/v1.6.0"><img src="https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
-  <a href="https://github.com/infiniV/VoiceFlow/releases/tag/v1.6.0"><img src="https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
+  <a href="https://github.com/infiniV/VoiceFlow/releases/latest"><img src="https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+  <a href="https://github.com/infiniV/VoiceFlow/releases/latest"><img src="https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux"></a>
+  <a href="https://github.com/infiniV/VoiceFlow/releases/latest"><img src="https://img.shields.io/badge/Download-macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS"></a>
   <a href="https://get-voice-flow.vercel.app/"><img src="https://img.shields.io/badge/Website-000000?style=for-the-badge&logo=vercel&logoColor=white" alt="Website"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="MIT License"></a>
 </p>
 
 <p align="center">
-  <sub>Latest: <a href="https://github.com/infiniV/VoiceFlow/releases/tag/v1.6.0"><code>v1.6.0</code></a> · <a href="https://github.com/infiniV/VoiceFlow/releases">all releases</a></sub>
+  <sub>Latest: <a href="https://github.com/infiniV/VoiceFlow/releases/latest">latest release</a> · <a href="https://github.com/infiniV/VoiceFlow/releases">all releases</a></sub>
 </p>
 
 <p align="center">
@@ -51,7 +50,7 @@ Long-form recording that captures your mic plus system audio (Zoom, Meet, anythi
   <img src="media/meetings-detail.png" alt="Meeting detail with transcript, summary, and audio player" width="100%">
 </p>
 
-- **System audio + mic in one file.** Stereo capture via WASAPI loopback (Windows) and PipeWire/PulseAudio (Linux).
+- **System audio + mic in one file.** Stereo capture via WASAPI loopback (Windows), PipeWire/PulseAudio (Linux), and ScreenCaptureKit (macOS).
 - **Pause, resume, stop** from the dashboard or the tray menu — recording survives across hour-long calls.
 - **Re-transcribe** any saved recording with a different model, device, or language without re-recording.
 - **Bring your own LLM.** OpenAI, Groq, OpenRouter, Ollama, or any OpenAI-compatible endpoint. Keys live in your OS keychain.
@@ -67,7 +66,7 @@ Recording, transcription, search, and storage stay local. The only network call 
 - **16+ Whisper models.** Tiny (75 MB) through Large-v3 (3 GB), plus Turbo, distilled, and `.en` variants. The picker shows speed, accuracy, parameter count, and disk size for each.
 - **CUDA when available.** Auto-detects your GPU, falls back to CPU.
 - **Hold or Toggle modes.** Configurable hotkeys including modifier-only combos like `Ctrl+Win`.
-- **Wayland and X11.** Native `evdev` input on Linux, Hyprland window rules, `wl-copy` and `wtype`/`ydotool` for paste.
+- **Windows, Linux, and macOS.** Native Windows hotkeys, `evdev` on Linux, Command-key hotkeys on macOS, and platform-specific paste handling.
 - **99+ languages.** Whisper handles language detection automatically.
 - **Searchable history.** SQLite log of every transcript, stored at `~/.VoiceFlow/`.
 - **Dark mode by default.** Light and system themes if you want them.
@@ -84,12 +83,19 @@ Recording, transcription, search, and storage stay local. The only network call 
 
 ## Install
 
-Grab the latest binary from [Releases](https://github.com/infiniV/VoiceFlow/releases) — currently [`v1.6.0`](https://github.com/infiniV/VoiceFlow/releases/tag/v1.6.0):
+Grab the latest binary from [Releases](https://github.com/infiniV/VoiceFlow/releases/latest):
 
 - **Windows 10/11**: `.exe` installer (Inno Setup)
 - **Linux**: `.AppImage` or `.tar.gz`
+- **macOS 13+ on Apple Silicon**: signed and notarized `.dmg`
 
-64-bit only. First launch walks you through a seven-step setup: microphone, compute device, Whisper model download, hotkey. If you delete the model later, a recovery dialog lets you re-download or pick a different one.
+64-bit only. First launch walks you through setup: microphone, compute device, Whisper model download, hotkey. If you delete the model later, a recovery dialog lets you re-download or pick a different one.
+
+On macOS, grant these permissions when prompted:
+
+- **Accessibility** and **Input Monitoring** for global hotkeys and automatic paste.
+- **Microphone** for push-to-talk dictation and mic recording.
+- **Screen Recording** only if you want Meeting Mode to capture system audio.
 
 ## Build from source
 
@@ -105,7 +111,7 @@ Platform installers (run on the matching OS):
 ```bash
 pnpm run build:installer          # Windows (.exe via Inno Setup)
 pnpm run build:installer:linux    # Linux (.AppImage and .tar.gz)
-pnpm run build:installer:macos    # macOS (.dmg, unsupported)
+pnpm run build:installer:macos    # macOS (.dmg)
 ```
 
 ## Stack

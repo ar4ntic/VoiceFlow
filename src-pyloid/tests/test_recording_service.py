@@ -44,6 +44,17 @@ def _read(path) -> tuple[np.ndarray, int]:
     return data, sr
 
 
+class _FailingAudioSource:
+    sample_rate = 16000
+    channels = 1
+
+    def start(self, _on_frames) -> None:
+        raise RuntimeError("source unavailable")
+
+    def stop(self) -> None:
+        pass
+
+
 # ---------- lifecycle / errors ----------
 
 class TestLifecycle:
@@ -87,6 +98,19 @@ class TestLifecycle:
         assert rec.get_state()["state"] == "recording"
         rec.stop()
         assert rec.get_state()["state"] == "idle"
+
+    def test_source_start_failure_cleans_partial_state(self, tmp_path):
+        rec, _ = _make_recorder()
+        mic = FakeAudioSource()
+        failing = _FailingAudioSource()
+        path = tmp_path / "partial.wav"
+
+        with pytest.raises(RuntimeError, match="source unavailable"):
+            rec.start(recording_id=1, file_path=path, mic=mic, loopback=failing)
+
+        assert rec.get_state()["state"] == "idle"
+        assert mic._stopped is True
+        assert not path.exists()
 
 
 # ---------- mono ----------

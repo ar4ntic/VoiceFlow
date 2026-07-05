@@ -92,6 +92,12 @@ export const api = {
     await rpc.call("open_external_url", { url });
   },
 
+  async openMacOSPrivacySettings(
+    pane: "microphone" | "screen_recording" | "accessibility" | "input_monitoring",
+  ): Promise<{ success: boolean }> {
+    return rpc.call("open_macos_privacy_settings", { pane });
+  },
+
   async setPopupEnabled(enabled: boolean): Promise<void> {
     await rpc.call("set_popup_enabled", { enabled });
   },

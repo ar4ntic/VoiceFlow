@@ -44,6 +44,11 @@ const DEVICE_OPTIONS = [
   },
 ];
 
+const IS_MAC =
+  ((navigator as unknown as { userAgentData?: { platform: string } }).userAgentData?.platform ??
+    navigator.platform ??
+    navigator.userAgent).includes("Mac");
+
 export const StepHardware = ({
   device,
   setDevice,
@@ -123,7 +128,7 @@ export const StepHardware = ({
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const showDownloadButton = gpuInfo?.gpuName && !gpuInfo?.cudnnAvailable;
+  const showDownloadButton = !IS_MAC && gpuInfo?.gpuName && !gpuInfo?.cudnnAvailable;
   const resolvedDevice =
     device === "auto"
       ? gpuInfo?.cudaAvailable
@@ -162,7 +167,8 @@ export const StepHardware = ({
         >
           {DEVICE_OPTIONS.map((d) => {
             const isActive = device === d.id;
-            const isDisabled = d.id === "cuda" && !gpuInfo?.cudaAvailable;
+            const isDisabled =
+              d.id === "cuda" && (IS_MAC || !gpuInfo?.cudaAvailable);
             return (
               <button
                 key={d.id}
@@ -210,10 +216,17 @@ export const StepHardware = ({
           })}
         </div>
 
-        {deviceError && (
+            {deviceError && (
           <p className="font-mono text-[11px] text-destructive flex items-center gap-2 border-l-2 border-destructive/40 pl-3 py-1">
             <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />
             {deviceError}
+          </p>
+        )}
+
+        {IS_MAC && (
+          <p className="font-mono text-[11px] text-cream-muted/70 border-l-2 border-border pl-3 py-1">
+            macOS currently uses CPU for transcription. Metal acceleration is
+            not enabled in this build.
           </p>
         )}
 

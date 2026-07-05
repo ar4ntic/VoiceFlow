@@ -101,6 +101,18 @@ export interface HotkeyValidation {
   normalized: string;
 }
 
+export type PermissionStatus =
+  | "granted"
+  | "denied"
+  | "not_determined"
+  | "unknown";
+
+export interface MacOSPermissionSnapshot {
+  microphone: PermissionStatus;
+  screenRecording: PermissionStatus;
+  accessibility: PermissionStatus;
+}
+
 export interface GpuInfo {
   cudaAvailable: boolean;
   deviceCount: number;
@@ -170,6 +182,7 @@ export interface AudioSource {
 export interface AudioSourceList {
   mic: AudioSource[];
   loopback: AudioSource[];
+  permissions?: MacOSPermissionSnapshot;
 }
 
 export interface RecorderState {

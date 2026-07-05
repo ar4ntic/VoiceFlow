@@ -7,6 +7,7 @@ from services.logger import get_logger
 log = get_logger("clipboard")
 
 IS_LINUX = sys.platform.startswith('linux')
+IS_DARWIN = sys.platform == 'darwin'
 IS_WAYLAND = IS_LINUX and bool(
     __import__('os').environ.get('WAYLAND_DISPLAY')
     or __import__('os').environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
@@ -88,7 +89,7 @@ class ClipboardService:
             return False
 
     def _simulate_paste_keystroke(self):
-        """Send Ctrl+V using the best available tool."""
+        """Send the platform paste shortcut using the best available tool."""
         if IS_WAYLAND and self._paste_tool:
             try:
                 if self._paste_tool == 'wtype':
@@ -106,8 +107,9 @@ class ClipboardService:
                 log.warning("Paste tool failed, falling back to pyautogui",
                             tool=self._paste_tool, error=str(e))
 
-        # Fallback: pyautogui (works via XWayland)
-        self._get_pyautogui().hotkey('ctrl', 'v')
+        # Fallback: pyautogui (works via XWayland on Linux).
+        modifier = 'command' if IS_DARWIN else 'ctrl'
+        self._get_pyautogui().hotkey(modifier, 'v')
 
     def paste_at_cursor(self, text: str):
         """Copy text to clipboard and paste at current cursor position."""
@@ -129,7 +131,7 @@ class ClipboardService:
         # Small delay to ensure clipboard is ready
         time.sleep(0.1)
 
-        log.debug("Simulating Ctrl+V")
+        log.debug("Simulating paste shortcut")
         self._simulate_paste_keystroke()
         log.debug("Paste command sent")
 

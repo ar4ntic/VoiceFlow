@@ -38,7 +38,20 @@ else:
 
 if __name__ == '__main__':
 	extra_args = []
-	if get_platform() == 'linux':
+	if get_platform() == 'macos':
+		extra_args += [
+			'--target-arch=arm64',
+			'--osx-bundle-identifier=io.github.infiniv.VoiceFlow',
+			'--hidden-import=pynput.keyboard._darwin',
+			'--collect-submodules=pynput',
+			'--hidden-import=ScreenCaptureKit',
+			'--hidden-import=CoreMedia',
+			'--hidden-import=CoreAudio',
+			'--hidden-import=AVFoundation',
+			'--hidden-import=Quartz',
+			'--hidden-import=ApplicationServices',
+		]
+	elif get_platform() == 'linux':
 		extra_args += [
 			'--collect-all=evdev',
 			'--hidden-import=evdev',

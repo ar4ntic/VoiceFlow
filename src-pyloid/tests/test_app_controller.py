@@ -34,6 +34,7 @@ def controller(temp_db):
     ctrl._on_amplitude = None
     ctrl._on_error = None
     ctrl._shutdown_done = False
+    ctrl._popup_enabled = True
 
     yield ctrl
 
@@ -137,6 +138,23 @@ class TestAppController:
             on_recording_start=on_start,
             on_recording_stop=on_stop,
         )
+
+    def test_hotkey_activation_failure_does_not_start_ui(self, controller, monkeypatch):
+        started = []
+        errors = []
+
+        def _raise():
+            raise RuntimeError("mic unavailable")
+
+        monkeypatch.setattr(controller.audio_service, "start_recording", _raise)
+        controller.set_ui_callbacks(
+            on_recording_start=lambda: started.append(True),
+            on_error=lambda message: errors.append(message),
+        )
+
+        assert controller._handle_hotkey_activate() is False
+        assert started == []
+        assert errors == ["VoiceFlow could not start recording: mic unavailable"]
 
     def test_shutdown_stops_hotkey_service(self, controller):
         """shutdown stops the hotkey service."""

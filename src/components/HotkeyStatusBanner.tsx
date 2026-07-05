@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, X } from "lucide-react";
+import { AlertTriangle, ExternalLink, X } from "lucide-react";
 import { api } from "@/lib/api";
 
 const DISMISS_KEY = "voiceflow:hotkey-banner-dismissed-code";
@@ -50,6 +50,13 @@ export function HotkeyStatusBanner() {
     setDismissedCode(status.code);
   };
 
+  const macOSPane =
+    status.code === "macos_input_monitoring_required"
+      ? "input_monitoring"
+      : status.code === "macos_accessibility_required" || status.code === "pynput_failed"
+        ? "accessibility"
+        : null;
+
   return (
     <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 md:px-8 py-3 flex items-start gap-3 text-sm">
       <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
@@ -60,6 +67,16 @@ export function HotkeyStatusBanner() {
         <p className="text-amber-700/80 dark:text-amber-300/80 mt-0.5">
           {status.message} You can still use the Record button on the dashboard.
         </p>
+        {macOSPane && (
+          <button
+            type="button"
+            onClick={() => api.openMacOSPrivacySettings(macOSPane)}
+            className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 dark:text-amber-200 hover:text-amber-900 dark:hover:text-amber-100"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            Open System Settings
+          </button>
+        )}
       </div>
       <button
         type="button"

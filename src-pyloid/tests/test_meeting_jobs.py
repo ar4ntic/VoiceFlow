@@ -42,6 +42,7 @@ import pytest
 
 from services.database import DatabaseService
 from services.recording.controller import MeetingsController, _Job
+from services.recording.recorder import RecorderAlreadyStartedError
 from services.settings import SettingsService
 from services.transcription import CancelToken
 
@@ -167,6 +168,17 @@ class _Env:
         return rid
 
 
+class _FailingStartSource:
+    sample_rate = 16000
+    channels = 1
+
+    def start(self, _on_frames):
+        raise RuntimeError("mic unavailable")
+
+    def stop(self):
+        pass
+
+
 @pytest.fixture
 def env():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -190,6 +202,33 @@ def env():
         finally:
             ctrl._transcribe_q.shutdown()
             ctrl._summarize_q.shutdown()
+
+
+class TestRecordingStartCleanup:
+    def test_start_failure_deletes_transient_row_and_wav(self, env, monkeypatch):
+        monkeypatch.setattr(env.ctrl, "_build_mic_source", lambda _device_id: _FailingStartSource())
+
+        with pytest.raises(RuntimeError, match="mic unavailable"):
+            env.ctrl.start("Start failure", mic_device_id=1, loopback_device_id=None)
+
+        assert env.db.list_recordings() == []
+        assert list((env.root / "recordings").glob("*.wav")) == []
+
+    def test_already_running_does_not_emit_idle_or_stop_tick(self, env, monkeypatch):
+        stopped_tick = []
+
+        def _raise_already_running(**_kwargs):
+            raise RecorderAlreadyStartedError("already running")
+
+        monkeypatch.setattr(env.ctrl.recorder, "start", _raise_already_running)
+        monkeypatch.setattr(env.ctrl, "_stop_tick", lambda: stopped_tick.append(True))
+
+        with pytest.raises(RecorderAlreadyStartedError):
+            env.ctrl.start("Already running", mic_device_id=1, loopback_device_id=None)
+
+        assert env.db.list_recordings() == []
+        assert stopped_tick == []
+        assert env.events_named("meeting-state") == []
 
 
 # ────────────────────────────────────────────────────── transcribe happy path

@@ -7,6 +7,8 @@ log = get_logger("hotkey")
 
 # Platform detection
 IS_LINUX = sys.platform.startswith('linux')
+IS_DARWIN = sys.platform == 'darwin'
+IS_WIN32 = sys.platform == 'win32'
 
 # Canonical modifier order for consistent hotkey strings
 MODIFIER_ORDER = ['ctrl', 'alt', 'shift', 'win']
@@ -174,10 +176,54 @@ if IS_LINUX:
         return keyboards
 
 
+def _pynput_key_to_name(key) -> Optional[str]:
+    """Map a pynput key event to a VoiceFlow key name."""
+    from pynput.keyboard import Key, KeyCode
+
+    if isinstance(key, KeyCode):
+        if key.char:
+            return key.char.lower()
+        return None
+
+    if not isinstance(key, Key):
+        return None
+
+    if key in (Key.ctrl, Key.ctrl_l, Key.ctrl_r):
+        return 'ctrl'
+    if key in (Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr):
+        return 'alt'
+    if key in (Key.shift, Key.shift_l, Key.shift_r):
+        return 'shift'
+    if key in (Key.cmd, Key.cmd_l, Key.cmd_r):
+        return 'win'
+
+    named = {
+        Key.space: 'space',
+        Key.enter: 'enter',
+        Key.tab: 'tab',
+        Key.esc: 'esc',
+        Key.backspace: 'backspace',
+        Key.delete: 'delete',
+        Key.up: 'up',
+        Key.down: 'down',
+        Key.left: 'left',
+        Key.right: 'right',
+    }
+    if key in named:
+        return named[key]
+
+    for i in range(1, 13):
+        fn = getattr(Key, f'f{i}', None)
+        if key == fn:
+            return f'f{i}'
+
+    return None
+
+
 class HotkeyService:
     def __init__(self):
         # Callbacks
-        self._on_activate: Optional[Callable[[], None]] = None
+        self._on_activate: Optional[Callable[[], bool | None]] = None
         self._on_deactivate: Optional[Callable[[], None]] = None
 
         # Recording state
@@ -195,15 +241,22 @@ class HotkeyService:
         # Status tracking - exposed to UI so users see why hotkeys are silent
         self._status: dict = {"available": True, "code": "ok", "message": "", "device_count": 0}
 
+        # Shared pressed-key tracking for Linux evdev and macOS pynput
+        if IS_LINUX or IS_DARWIN:
+            self._pressed_keys: set[str] = set()
+
         # Linux evdev state
         if IS_LINUX:
             self._evdev_thread: Optional[threading.Thread] = None
             self._evdev_stop = threading.Event()
-            self._pressed_keys: set[str] = set()
+
+        # macOS pynput state
+        if IS_DARWIN:
+            self._pynput_listener = None
 
     def set_callbacks(
         self,
-        on_activate: Callable[[], None],
+        on_activate: Callable[[], bool | None],
         on_deactivate: Callable[[], None],
     ):
         """Set callbacks for hotkey activation and deactivation."""
@@ -263,8 +316,9 @@ class HotkeyService:
 
         self._hold_active = True
         log.info("Hold hotkey activated")
-        if self._on_activate:
-            self._on_activate()
+        if not self._invoke_activate_callback():
+            self._hold_active = False
+            self._cancel_max_timer()
 
     def _deactivate_hold(self):
         """Deactivate hold mode recording."""
@@ -286,11 +340,23 @@ class HotkeyService:
             # Start recording
             self._toggle_active = True
             log.info("Toggle hotkey activated - recording started")
-            if self._on_activate:
-                self._on_activate()
+            if not self._invoke_activate_callback():
+                self._toggle_active = False
+                self._cancel_max_timer()
         else:
             # Stop recording
             self._deactivate_toggle()
+
+    def _invoke_activate_callback(self) -> bool:
+        """Run the activation callback and report whether recording started."""
+        if self._on_activate is None:
+            return True
+        try:
+            result = self._on_activate()
+        except Exception as exc:
+            log.error("Hotkey activation callback failed", error=str(exc))
+            return False
+        return result is not False
 
     def _deactivate_toggle(self):
         """Deactivate toggle mode recording."""
@@ -332,6 +398,8 @@ class HotkeyService:
         """Register all enabled hotkeys."""
         if IS_LINUX:
             self._register_hotkeys_evdev()
+        elif IS_DARWIN:
+            self._register_hotkeys_pynput()
         else:
             self._register_hotkeys_keyboard()
 
@@ -339,6 +407,8 @@ class HotkeyService:
         """Unregister all hotkeys and release handlers."""
         if IS_LINUX:
             self._unregister_hotkeys_evdev()
+        elif IS_DARWIN:
+            self._unregister_hotkeys_pynput()
         else:
             self._unregister_hotkeys_keyboard()
 
@@ -413,6 +483,113 @@ class HotkeyService:
             log.info("Toggle hotkey registered successfully", hotkey=self._toggle_hotkey)
         except Exception as e:
             log.error("Failed to register toggle hotkey", hotkey=self._toggle_hotkey, error=str(e))
+
+    # --- macOS: pynput global keyboard listener ---
+
+    def _register_hotkeys_pynput(self):
+        """Start pynput listener for hotkey detection on macOS."""
+        log.info("Registering hotkeys via pynput")
+        self._pressed_keys = set()
+
+        permission_status = self._check_macos_hotkey_permissions()
+        if permission_status is not None:
+            self._status = permission_status
+            return
+
+        try:
+            from pynput.keyboard import Listener
+
+            self._pynput_listener = Listener(
+                on_press=self._on_pynput_press,
+                on_release=self._on_pynput_release,
+            )
+            self._pynput_listener.start()
+        except Exception as e:
+            log.error("Failed to start pynput listener", error=str(e))
+            self._status = {
+                "available": False,
+                "code": "pynput_failed",
+                "message": (
+                    "VoiceFlow couldn't start global hotkey listening. "
+                    "Grant Accessibility and Input Monitoring permission in System Settings."
+                ),
+                "device_count": 0,
+            }
+            return
+
+        self._status = {
+            "available": True,
+            "code": "ok",
+            "message": "",
+            "device_count": 1,
+        }
+        log.info("pynput listener started")
+
+    def _check_macos_hotkey_permissions(self) -> Optional[dict]:
+        if not IS_DARWIN:
+            return None
+        try:
+            from services.macos_permissions import (
+                get_accessibility_permission_status,
+                get_input_monitoring_permission_status,
+            )
+        except Exception as exc:
+            log.warning("macOS permission helpers unavailable", error=str(exc))
+            return None
+
+        accessibility = get_accessibility_permission_status(prompt=False)
+        if accessibility != "granted":
+            return {
+                "available": False,
+                "code": "macos_accessibility_required",
+                "message": (
+                    "VoiceFlow needs Accessibility permission before global "
+                    "hotkeys and automatic paste can work."
+                ),
+                "device_count": 0,
+            }
+
+        input_monitoring = get_input_monitoring_permission_status()
+        if input_monitoring in {"denied", "not_determined"}:
+            return {
+                "available": False,
+                "code": "macos_input_monitoring_required",
+                "message": (
+                    "VoiceFlow needs Input Monitoring permission before it can "
+                    "listen for global hotkeys."
+                ),
+                "device_count": 0,
+            }
+        return None
+
+    def _on_pynput_press(self, key):
+        name = _pynput_key_to_name(key)
+        if not name:
+            return
+        self._pressed_keys.add(name)
+        self._check_hotkey_combo_press()
+
+    def _on_pynput_release(self, key):
+        name = _pynput_key_to_name(key)
+        if not name:
+            return
+        if self._hold_active:
+            hold_keys = set(self._parse_hotkey_keys(self._hold_hotkey))
+            if name in hold_keys:
+                log.debug("Hold key released (pynput)", key=name)
+                self._deactivate_hold()
+        self._pressed_keys.discard(name)
+
+    def _unregister_hotkeys_pynput(self):
+        """Stop pynput listener."""
+        if self._pynput_listener is not None:
+            try:
+                self._pynput_listener.stop()
+                self._pynput_listener.join(timeout=2)
+            except Exception as e:
+                log.error("Failed to stop pynput listener", error=str(e))
+            self._pynput_listener = None
+            log.info("pynput listener stopped")
 
     # --- Linux: evdev (reads directly from /dev/input, bypasses Wayland) ---
 
@@ -559,8 +736,10 @@ class HotkeyService:
             return False
         self._toggle_active = True
         log.info("Manual recording started")
-        if self._on_activate:
-            self._on_activate()
+        if not self._invoke_activate_callback():
+            self._toggle_active = False
+            self._cancel_max_timer()
+            return False
         return True
 
     def manual_stop(self) -> bool:

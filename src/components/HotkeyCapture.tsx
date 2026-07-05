@@ -24,11 +24,17 @@ const MODIFIER_KEYS = new Set(["ctrl", "shift", "alt", "win"]);
 // Canonical modifier order - must match backend MODIFIER_ORDER in hotkey.py
 const MODIFIER_ORDER = ["ctrl", "alt", "shift", "win"];
 
+const IS_MAC =
+  ((navigator as unknown as { userAgentData?: { platform: string } }).userAgentData?.platform ??
+    navigator.platform ??
+    navigator.userAgent).includes("Mac");
+
 function normalizeKey(key: string): string {
   return KEY_MAP[key] || key.toLowerCase();
 }
 
 function formatKeyForDisplay(key: string): string {
+  if (IS_MAC && key === "win") return "Command";
   // Capitalize first letter
   return key.charAt(0).toUpperCase() + key.slice(1);
 }

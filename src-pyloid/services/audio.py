@@ -52,7 +52,6 @@ class AudioService:
         if self._recording:
             return
 
-        self._recording = True
         self._audio_data = []
 
         # Clear queue
@@ -66,8 +65,9 @@ class AudioService:
 
         # Try 16kHz first (Whisper's native rate), fall back to device default
         self._actual_sample_rate = self.TARGET_SAMPLE_RATE
+        stream = None
         try:
-            self._stream = sd.InputStream(
+            stream = sd.InputStream(
                 samplerate=self.TARGET_SAMPLE_RATE,
                 channels=self.CHANNELS,
                 dtype=self.DTYPE,
@@ -81,7 +81,7 @@ class AudioService:
             log.warning("16kHz not supported, using device default",
                         fallback_rate=fallback_rate)
             self._actual_sample_rate = fallback_rate
-            self._stream = sd.InputStream(
+            stream = sd.InputStream(
                 samplerate=fallback_rate,
                 channels=self.CHANNELS,
                 dtype=self.DTYPE,
@@ -89,7 +89,20 @@ class AudioService:
                 blocksize=1024,
                 device=self._device_id,
             )
-        self._stream.start()
+        try:
+            stream.start()
+        except Exception:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            self._stream = None
+            self._recording = False
+            self._audio_data = []
+            raise
+
+        self._stream = stream
+        self._recording = True
         log.debug("Recording started", sample_rate=self._actual_sample_rate)
 
     def stop_recording(self) -> np.ndarray:

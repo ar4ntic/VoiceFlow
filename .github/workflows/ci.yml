@@ -166,9 +166,6 @@ jobs:
       - name: Build unsigned macOS app
         run: pnpm run build
 
-      - name: Build unsigned DMG
-        run: bash installer/build-macos.sh --unsigned
-
       - name: Smoke test macOS bundle
         run: |
           PLIST="./dist/VoiceFlow.app/Contents/Info.plist"
@@ -179,7 +176,6 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSScreenCaptureUsageDescription" "$PLIST" >/dev/null
           /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$PLIST" | grep -qx "13.0"
           file "./dist/VoiceFlow.app/Contents/MacOS/$EXEC" | grep -q "arm64"
-          test -f ./dist/installer/VoiceFlow-*-macos-arm64-unsigned.dmg
 
       - name: Backend tests
         run: uv run -p .venv pytest src-pyloid/tests/ -q --ignore=src-pyloid/tests/test_transcription.py

@@ -17,8 +17,7 @@ GitHub Actions release builds require:
 
 ```bash
 pnpm run setup
-pnpm run build
-bash installer/build-macos.sh --unsigned
+pnpm run build:installer:macos:unsigned
 ```
 
 The unsigned artifact is written to `dist/installer/VoiceFlow-<version>-macos-arm64-unsigned.dmg`.
@@ -33,8 +32,7 @@ export APPLE_ID="release@example.com"
 export APPLE_TEAM_ID="TEAMID"
 export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
 
-pnpm run build
-bash installer/build-macos.sh
+pnpm run build:installer:macos
 ```
 
 The script patches `Info.plist`, verifies the executable is `arm64`, signs nested binaries and the outer app with `installer/macos-entitlements.plist`, creates the DMG, signs the DMG, submits it to Apple notarization, staples it, and runs Gatekeeper verification.
@@ -49,6 +47,7 @@ VoiceFlow declares:
 
 - `NSMicrophoneUsageDescription` for microphone recording.
 - `NSScreenCaptureUsageDescription` for ScreenCaptureKit system-audio capture.
+- `NSInputMonitoringUsageDescription` for global hotkey listening.
 
 Users may also need to grant Accessibility and Input Monitoring in System Settings for global hotkeys and automatic paste.
 

@@ -1,5 +1,6 @@
 import sys
 import os
+import plistlib
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
@@ -18,6 +19,24 @@ main_script = './src-pyloid/main.py'
 name = 'VoiceFlow'
 dist_path = './dist'
 work_path = './build'
+
+
+def patch_macos_info_plist(app_bundle: str):
+	plist_path = os.path.join(app_bundle, 'Contents', 'Info.plist')
+	if not os.path.exists(plist_path):
+		return
+
+	with open(plist_path, 'rb') as f:
+		plist = plistlib.load(f)
+
+	plist.update({
+		'NSMicrophoneUsageDescription': 'VoiceFlow needs microphone access to record dictation and meetings.',
+		'NSScreenCaptureUsageDescription': 'VoiceFlow needs Screen Recording permission to capture system audio for Meeting Mode.',
+		'NSInputMonitoringUsageDescription': 'VoiceFlow needs Input Monitoring permission to listen for global hotkeys.',
+	})
+
+	with open(plist_path, 'wb') as f:
+		plistlib.dump(plist, f)
 
 
 if get_platform() == 'windows':
@@ -84,6 +103,7 @@ if __name__ == '__main__':
 	if get_platform() == 'windows':
 		optimize(f'{dist_path}/{name}/_internal', optimize_spec)
 	elif get_platform() == 'macos':
+		patch_macos_info_plist(f'{dist_path}/{name}.app')
 		optimize(f'{dist_path}/{name}.app', optimize_spec)
 	else:
 		optimize(f'{dist_path}/{name}/_internal', optimize_spec)

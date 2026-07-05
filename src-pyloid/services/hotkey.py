@@ -1,6 +1,10 @@
 import sys
+import os
+import subprocess
 from typing import Callable, Optional
 import threading
+import time
+from pathlib import Path
 from services.logger import get_logger
 
 log = get_logger("hotkey")
@@ -107,6 +111,108 @@ def are_hotkeys_conflicting(hotkey1: str, hotkey2: str) -> bool:
         return False
 
     return normalize_hotkey(hotkey1) == normalize_hotkey(hotkey2)
+
+
+def _is_source_run() -> bool:
+    return not bool(getattr(sys, "frozen", False))
+
+
+def _macos_source_host_name() -> Optional[str]:
+    if not IS_DARWIN:
+        return None
+
+    host_names = [
+        ("cursor", "Cursor"),
+        ("visual studio code", "Visual Studio Code"),
+        ("code helper", "Visual Studio Code"),
+        ("codex", "Codex"),
+        ("terminal", "Terminal"),
+        ("iterm", "iTerm"),
+        ("warp", "Warp"),
+        ("ghostty", "Ghostty"),
+    ]
+
+    pid = os.getpid()
+    seen: set[int] = set()
+    for _ in range(16):
+        if pid <= 1 or pid in seen:
+            break
+        seen.add(pid)
+
+        try:
+            output = subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "ppid=", "-o", "args="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            break
+        if not output:
+            break
+
+        parts = output.split(maxsplit=1)
+        if not parts:
+            break
+
+        args = parts[1] if len(parts) > 1 else ""
+        normalized = args.lower()
+        for needle, label in host_names:
+            if needle in normalized:
+                return label
+
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            break
+
+    return None
+
+
+def _macos_permission_message(permission: str) -> str:
+    executable = Path(sys.executable).name or "the launcher process"
+
+    if _is_source_run():
+        host = _macos_source_host_name()
+        if host:
+            if permission == "accessibility":
+                return (
+                    f"VoiceFlow is running from {host}, so macOS grants "
+                    f"Accessibility to {host} for this dev session. Turn on "
+                    f"{host} in System Settings, not the VoiceFlow.app entries, "
+                    "then click Check again."
+                )
+            return (
+                f"VoiceFlow is running from {host}, so macOS grants Input "
+                f"Monitoring to {host} for this dev session. Turn on {host} "
+                "in System Settings, not the VoiceFlow.app entries, then "
+                "click Check again."
+            )
+
+        if permission == "accessibility":
+            return (
+                "VoiceFlow is running from source, so macOS grants Accessibility "
+                f"to {executable}, Terminal, or your editor instead of VoiceFlow.app. "
+                "Enable the item macOS shows for the running process, then restart "
+                "the dev session if the banner remains."
+            )
+        return (
+            "VoiceFlow is running from source, so macOS grants Input Monitoring "
+            f"to {executable}, Terminal, or your editor instead of VoiceFlow.app. "
+            "Enable the item macOS shows for the running process, then restart "
+            "the dev session if the banner remains."
+        )
+
+    if permission == "accessibility":
+        return (
+            "VoiceFlow needs Accessibility permission before global hotkeys and "
+            "automatic paste can work. If VoiceFlow is already enabled, quit and "
+            "reopen VoiceFlow so macOS applies the change."
+        )
+    return (
+        "VoiceFlow needs Input Monitoring permission before it can listen for "
+        "global hotkeys. If VoiceFlow is already enabled, quit and reopen "
+        "VoiceFlow so macOS applies the change."
+    )
 
 
 # ============================================================================
@@ -499,11 +605,22 @@ class HotkeyService:
         try:
             from pynput.keyboard import Listener
 
-            self._pynput_listener = Listener(
+            listener = Listener(
                 on_press=self._on_pynput_press,
                 on_release=self._on_pynput_release,
             )
-            self._pynput_listener.start()
+            self._pynput_listener = listener
+            listener.start()
+            ready = self._wait_for_pynput_listener(listener)
+            listener_alive = getattr(listener, "is_alive", lambda: True)()
+            listener_trusted = bool(getattr(listener, "IS_TRUSTED", True))
+            if not ready or not listener_alive or not listener_trusted:
+                self._unregister_hotkeys_pynput()
+                self._status = self._macos_pynput_unavailable_status(
+                    trusted=listener_trusted,
+                    alive=listener_alive,
+                )
+                return
         except Exception as e:
             log.error("Failed to start pynput listener", error=str(e))
             self._status = {
@@ -525,41 +642,89 @@ class HotkeyService:
         }
         log.info("pynput listener started")
 
-    def _check_macos_hotkey_permissions(self) -> Optional[dict]:
-        if not IS_DARWIN:
-            return None
-        try:
-            from services.macos_permissions import (
-                get_accessibility_permission_status,
-                get_input_monitoring_permission_status,
-            )
-        except Exception as exc:
-            log.warning("macOS permission helpers unavailable", error=str(exc))
-            return None
+    def _wait_for_pynput_listener(self, listener, timeout_s: float = 1.0) -> bool:
+        condition = getattr(listener, "_condition", None)
+        if condition is None:
+            return True
 
-        accessibility = get_accessibility_permission_status(prompt=False)
-        if accessibility != "granted":
+        deadline = time.monotonic() + timeout_s
+        with condition:
+            while not getattr(listener, "_ready", False):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                is_alive = getattr(listener, "is_alive", lambda: True)
+                if not is_alive():
+                    break
+                condition.wait(timeout=remaining)
+
+        return bool(getattr(listener, "_ready", False))
+
+    def _macos_pynput_unavailable_status(self, *, trusted: bool, alive: bool) -> dict:
+        if not trusted:
             return {
                 "available": False,
                 "code": "macos_accessibility_required",
-                "message": (
-                    "VoiceFlow needs Accessibility permission before global "
-                    "hotkeys and automatic paste can work."
-                ),
+                "message": _macos_permission_message("accessibility"),
                 "device_count": 0,
             }
 
-        input_monitoring = get_input_monitoring_permission_status()
+        input_monitoring = self._get_macos_input_monitoring_status()
         if input_monitoring in {"denied", "not_determined"}:
             return {
                 "available": False,
                 "code": "macos_input_monitoring_required",
-                "message": (
-                    "VoiceFlow needs Input Monitoring permission before it can "
-                    "listen for global hotkeys."
-                ),
+                "message": _macos_permission_message("input_monitoring"),
                 "device_count": 0,
             }
+
+        log.warning("pynput listener did not become ready", alive=alive)
+        return {
+            "available": False,
+            "code": "pynput_failed",
+            "message": (
+                "VoiceFlow couldn't start global hotkey listening. "
+                "Grant Accessibility and Input Monitoring permission in System Settings."
+            ),
+            "device_count": 0,
+        }
+
+    def _get_macos_input_monitoring_status(self) -> str:
+        if not IS_DARWIN:
+            return "unknown"
+        try:
+            from services.macos_permissions import get_input_monitoring_permission_status
+
+            return get_input_monitoring_permission_status()
+        except Exception as exc:
+            log.warning("macOS input-monitoring check unavailable", error=str(exc))
+            return "unknown"
+
+    def _check_macos_hotkey_permissions(self, *, prompt: bool = False) -> Optional[dict]:
+        if not IS_DARWIN:
+            return None
+        try:
+            from services.macos_permissions import get_accessibility_permission_status
+        except Exception as exc:
+            log.warning("macOS permission helpers unavailable", error=str(exc))
+            return None
+
+        accessibility = get_accessibility_permission_status(prompt=prompt)
+        if accessibility != "granted":
+            return {
+                "available": False,
+                "code": "macos_accessibility_required",
+                "message": _macos_permission_message("accessibility"),
+                "device_count": 0,
+            }
+
+        if prompt:
+            try:
+                from services.macos_permissions import request_input_monitoring_permission
+
+                request_input_monitoring_permission()
+            except Exception as exc:
+                log.warning("macOS input-monitoring prompt unavailable", error=str(exc))
         return None
 
     def _on_pynput_press(self, key):
@@ -590,6 +755,40 @@ class HotkeyService:
                 log.error("Failed to stop pynput listener", error=str(e))
             self._pynput_listener = None
             log.info("pynput listener stopped")
+
+    def _refresh_macos_status(self, *, prompt: bool = False):
+        """Refresh macOS permission state and listener registration."""
+        if not IS_DARWIN or not self._running:
+            return
+
+        permission_status = self._check_macos_hotkey_permissions(prompt=prompt)
+        if permission_status is not None:
+            if self._pynput_listener is not None:
+                self._unregister_hotkeys_pynput()
+            self._status = permission_status
+            return
+
+        if self._pynput_listener is None:
+            log.info("macOS hotkey permissions available, starting listener")
+            self._register_hotkeys_pynput()
+            return
+
+        listener_alive = getattr(self._pynput_listener, "is_alive", lambda: True)()
+        listener_trusted = bool(getattr(self._pynput_listener, "IS_TRUSTED", True))
+        if not listener_alive or not listener_trusted:
+            self._unregister_hotkeys_pynput()
+            self._status = self._macos_pynput_unavailable_status(
+                trusted=listener_trusted,
+                alive=listener_alive,
+            )
+            return
+
+        self._status = {
+            "available": True,
+            "code": "ok",
+            "message": "",
+            "device_count": 1,
+        }
 
     # --- Linux: evdev (reads directly from /dev/input, bypasses Wayland) ---
 
@@ -771,6 +970,7 @@ class HotkeyService:
             return "toggle"
         return None
 
-    def get_status(self) -> dict:
+    def get_status(self, *, prompt: bool = False) -> dict:
         """Return the current hotkey availability status for the UI."""
+        self._refresh_macos_status(prompt=prompt)
         return dict(self._status)

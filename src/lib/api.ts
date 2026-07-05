@@ -72,8 +72,8 @@ export const api = {
     return rpc.call("get_recording_state");
   },
 
-  async getHotkeyStatus(): Promise<{ available: boolean; code: string; message: string; device_count: number }> {
-    return rpc.call("get_hotkey_status");
+  async getHotkeyStatus(options?: { prompt?: boolean }): Promise<{ available: boolean; code: string; message: string; device_count: number }> {
+    return rpc.call("get_hotkey_status", options ?? {});
   },
 
   async startTestRecording(): Promise<void> {

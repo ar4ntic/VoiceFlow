@@ -42,7 +42,7 @@ import { ModelDownloadModal } from "./ModelDownloadModal";
 import { HotkeyCapture } from "./HotkeyCapture";
 import { LLMSettingsSection } from "./meetings/LLMSettingsSection";
 import { MeetingsSettingsSection } from "./meetings/MeetingsSettingsSection";
-import { cn } from "@/lib/utils";
+import { cn, isMacPlatform } from "@/lib/utils";
 
 const THEME_ICONS: Record<string, React.ElementType> = {
   light: Sun,
@@ -50,10 +50,7 @@ const THEME_ICONS: Record<string, React.ElementType> = {
   system: Monitor,
 };
 
-const IS_MAC =
-  ((navigator as unknown as { userAgentData?: { platform: string } }).userAgentData?.platform ??
-    navigator.platform ??
-    navigator.userAgent).includes("Mac");
+const IS_MAC = isMacPlatform();
 
 const SECTIONS = [
   { id: "transcription", num: "01", label: "transcription" },

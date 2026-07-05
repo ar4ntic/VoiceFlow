@@ -1,15 +1,20 @@
-import { useEffect, useState } from "react";
-import { AlertTriangle, ExternalLink, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, ExternalLink, RefreshCw, X } from "lucide-react";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 const DISMISS_KEY = "voiceflow:hotkey-banner-dismissed-code";
 
+type HotkeyStatus = {
+  available: boolean;
+  code: string;
+  message: string;
+};
+
 export function HotkeyStatusBanner() {
-  const [status, setStatus] = useState<{
-    available: boolean;
-    code: string;
-    message: string;
-  } | null>(null);
+  const mountedRef = useRef(true);
+  const [status, setStatus] = useState<HotkeyStatus | null>(null);
+  const [isManualChecking, setIsManualChecking] = useState(false);
   const [dismissedCode, setDismissedCode] = useState<string | null>(() => {
     try {
       return localStorage.getItem(DISMISS_KEY);
@@ -18,25 +23,47 @@ export function HotkeyStatusBanner() {
     }
   });
 
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const s = await api.getHotkeyStatus();
-        if (!cancelled) setStatus(s);
-      } catch {
-        // ignore
+  const checkStatus = useCallback(async (options?: { prompt?: boolean }) => {
+    try {
+      const nextStatus = await api.getHotkeyStatus(options);
+      if (!mountedRef.current) return;
+      setStatus(nextStatus);
+
+      if (nextStatus.available) {
+        try {
+          localStorage.removeItem(DISMISS_KEY);
+        } catch {
+          // ignore
+        }
+        setDismissedCode(null);
       }
-    };
-    check();
-    // Re-check periodically — user may add themselves to the input group
-    // and re-launch services without restarting the app.
-    const id = window.setInterval(check, 10000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
+    } catch {
+      // ignore
+    }
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    checkStatus();
+
+    const checkQuietly = () => {
+      void checkStatus();
+    };
+    const checkWhenVisible = () => {
+      if (!document.hidden) void checkStatus();
+    };
+
+    const id = window.setInterval(checkQuietly, 10000);
+    window.addEventListener("focus", checkQuietly);
+    document.addEventListener("visibilitychange", checkWhenVisible);
+
+    return () => {
+      mountedRef.current = false;
+      window.clearInterval(id);
+      window.removeEventListener("focus", checkQuietly);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+    };
+  }, [checkStatus]);
 
   if (!status || status.available) return null;
   if (status.code === dismissedCode) return null;
@@ -57,6 +84,22 @@ export function HotkeyStatusBanner() {
         ? "accessibility"
         : null;
 
+  const handleOpenSettings = async () => {
+    if (!macOSPane) return;
+    await api.openMacOSPrivacySettings(macOSPane);
+    window.setTimeout(checkStatus, 500);
+    window.setTimeout(checkStatus, 2500);
+  };
+
+  const handleCheckAgain = async () => {
+    setIsManualChecking(true);
+    try {
+      await checkStatus({ prompt: true });
+    } finally {
+      if (mountedRef.current) setIsManualChecking(false);
+    }
+  };
+
   return (
     <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 md:px-8 py-3 flex items-start gap-3 text-sm">
       <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
@@ -67,16 +110,29 @@ export function HotkeyStatusBanner() {
         <p className="text-amber-700/80 dark:text-amber-300/80 mt-0.5">
           {status.message} You can still use the Record button on the dashboard.
         </p>
-        {macOSPane && (
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          {macOSPane && (
+            <button
+              type="button"
+              onClick={handleOpenSettings}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 dark:text-amber-200 hover:text-amber-900 dark:hover:text-amber-100"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Open System Settings
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => api.openMacOSPrivacySettings(macOSPane)}
-            className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 dark:text-amber-200 hover:text-amber-900 dark:hover:text-amber-100"
+            onClick={handleCheckAgain}
+            disabled={isManualChecking}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-800/80 dark:text-amber-200/80 hover:text-amber-900 dark:hover:text-amber-100 disabled:opacity-60"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
-            Open System Settings
+            <RefreshCw
+              className={cn("w-3.5 h-3.5", isManualChecking && "animate-spin")}
+            />
+            {isManualChecking ? "Checking" : "Check again"}
           </button>
-        )}
+        </div>
       </div>
       <button
         type="button"

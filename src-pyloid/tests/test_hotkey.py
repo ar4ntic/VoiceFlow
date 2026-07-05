@@ -6,6 +6,7 @@ from services.hotkey import (
     normalize_hotkey,
     validate_hotkey,
     are_hotkeys_conflicting,
+    _macos_permission_message,
     _pynput_key_to_name,
 )
 
@@ -280,3 +281,245 @@ class TestHotkeyService:
         time.sleep(0.1)
 
         service.stop()
+
+    def test_get_status_refreshes_macos_permissions_and_starts_listener(self, monkeypatch):
+        import services.hotkey as hotkey_module
+
+        monkeypatch.setattr(hotkey_module, "IS_DARWIN", True)
+        monkeypatch.setattr(hotkey_module, "IS_LINUX", False)
+
+        permission_state = {
+            "accessibility": "denied",
+            "input_monitoring": "denied",
+        }
+
+        permissions_module = types.ModuleType("services.macos_permissions")
+        permissions_module.get_accessibility_permission_status = (
+            lambda prompt=False: permission_state["accessibility"]
+        )
+        permissions_module.get_input_monitoring_permission_status = (
+            lambda: permission_state["input_monitoring"]
+        )
+        monkeypatch.setitem(sys.modules, "services.macos_permissions", permissions_module)
+
+        starts = []
+
+        class Listener:
+            def __init__(self, on_press=None, on_release=None):
+                self.on_press = on_press
+                self.on_release = on_release
+
+            def start(self):
+                starts.append(True)
+
+            def stop(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+        keyboard_module = types.ModuleType("pynput.keyboard")
+        keyboard_module.Listener = Listener
+        pynput_module = types.ModuleType("pynput")
+        pynput_module.keyboard = keyboard_module
+        monkeypatch.setitem(sys.modules, "pynput", pynput_module)
+        monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard_module)
+
+        service = HotkeyService()
+        service._running = True
+        service._status = {
+            "available": False,
+            "code": "macos_accessibility_required",
+            "message": "",
+            "device_count": 0,
+        }
+
+        assert service.get_status()["available"] is False
+
+        permission_state["accessibility"] = "granted"
+        permission_state["input_monitoring"] = "granted"
+
+        status = service.get_status()
+
+        assert status["available"] is True
+        assert status["code"] == "ok"
+        assert starts == [True]
+
+    def test_get_status_refreshes_macos_permission_revocation(self, monkeypatch):
+        import services.hotkey as hotkey_module
+
+        monkeypatch.setattr(hotkey_module, "IS_DARWIN", True)
+        monkeypatch.setattr(hotkey_module, "IS_LINUX", False)
+
+        permissions_module = types.ModuleType("services.macos_permissions")
+        permissions_module.get_accessibility_permission_status = lambda prompt=False: "denied"
+        permissions_module.get_input_monitoring_permission_status = lambda: "granted"
+        monkeypatch.setitem(sys.modules, "services.macos_permissions", permissions_module)
+
+        stops = []
+        joins = []
+
+        class Listener:
+            def stop(self):
+                stops.append(True)
+
+            def join(self, timeout=None):
+                joins.append(timeout)
+
+        service = HotkeyService()
+        service._running = True
+        service._pynput_listener = Listener()
+        service._status = {
+            "available": True,
+            "code": "ok",
+            "message": "",
+            "device_count": 1,
+        }
+
+        status = service.get_status()
+
+        assert status["available"] is False
+        assert status["code"] == "macos_accessibility_required"
+        assert service._pynput_listener is None
+        assert stops == [True]
+        assert joins == [2]
+
+    def test_get_status_prompt_requests_macos_input_monitoring_without_blocking_listener(self, monkeypatch):
+        import services.hotkey as hotkey_module
+
+        monkeypatch.setattr(hotkey_module, "IS_DARWIN", True)
+        monkeypatch.setattr(hotkey_module, "IS_LINUX", False)
+
+        accessibility_prompts = []
+        input_requests = []
+
+        permissions_module = types.ModuleType("services.macos_permissions")
+        permissions_module.get_accessibility_permission_status = (
+            lambda prompt=False: accessibility_prompts.append(prompt) or "granted"
+        )
+        permissions_module.get_input_monitoring_permission_status = lambda: "denied"
+        permissions_module.request_input_monitoring_permission = (
+            lambda: input_requests.append(True) or "denied"
+        )
+        monkeypatch.setitem(sys.modules, "services.macos_permissions", permissions_module)
+
+        starts = []
+
+        class Listener:
+            IS_TRUSTED = True
+
+            def __init__(self, on_press=None, on_release=None):
+                self.on_press = on_press
+                self.on_release = on_release
+
+            def start(self):
+                starts.append(True)
+
+            def stop(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+        keyboard_module = types.ModuleType("pynput.keyboard")
+        keyboard_module.Listener = Listener
+        pynput_module = types.ModuleType("pynput")
+        pynput_module.keyboard = keyboard_module
+        monkeypatch.setitem(sys.modules, "pynput", pynput_module)
+        monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard_module)
+
+        service = HotkeyService()
+        service._running = True
+
+        status = service.get_status(prompt=True)
+
+        assert status["available"] is True
+        assert status["code"] == "ok"
+        assert accessibility_prompts == [True, False]
+        assert input_requests == [True]
+        assert starts == [True]
+
+    def test_dead_macos_listener_reports_input_monitoring_required(self, monkeypatch):
+        import services.hotkey as hotkey_module
+
+        monkeypatch.setattr(hotkey_module, "IS_DARWIN", True)
+        monkeypatch.setattr(hotkey_module, "IS_LINUX", False)
+
+        permissions_module = types.ModuleType("services.macos_permissions")
+        permissions_module.get_accessibility_permission_status = lambda prompt=False: "granted"
+        permissions_module.get_input_monitoring_permission_status = lambda: "denied"
+        monkeypatch.setitem(sys.modules, "services.macos_permissions", permissions_module)
+
+        starts = []
+        stops = []
+        joins = []
+
+        class Listener:
+            IS_TRUSTED = True
+
+            def __init__(self, on_press=None, on_release=None):
+                self.on_press = on_press
+                self.on_release = on_release
+
+            def start(self):
+                starts.append(True)
+
+            def is_alive(self):
+                return False
+
+            def stop(self):
+                stops.append(True)
+
+            def join(self, timeout=None):
+                joins.append(timeout)
+
+        keyboard_module = types.ModuleType("pynput.keyboard")
+        keyboard_module.Listener = Listener
+        pynput_module = types.ModuleType("pynput")
+        pynput_module.keyboard = keyboard_module
+        monkeypatch.setitem(sys.modules, "pynput", pynput_module)
+        monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard_module)
+
+        service = HotkeyService()
+        service._running = True
+
+        status = service.get_status()
+
+        assert status["available"] is False
+        assert status["code"] == "macos_input_monitoring_required"
+        assert service._pynput_listener is None
+        assert starts == [True]
+        assert stops == [True]
+        assert joins == [2]
+
+    def test_macos_permission_message_names_source_run_launcher(self, monkeypatch):
+        import services.hotkey as hotkey_module
+
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        monkeypatch.setattr(sys, "executable", "/tmp/VoiceFlow/.venv/bin/python3")
+        monkeypatch.setattr(hotkey_module, "_macos_source_host_name", lambda: None)
+
+        message = _macos_permission_message("accessibility")
+
+        assert "running from source" in message
+        assert "python3" in message
+        assert "instead of VoiceFlow.app" in message
+
+    def test_macos_permission_message_names_source_host(self, monkeypatch):
+        import services.hotkey as hotkey_module
+
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        monkeypatch.setattr(hotkey_module, "_macos_source_host_name", lambda: "Cursor")
+
+        message = _macos_permission_message("accessibility")
+
+        assert "running from Cursor" in message
+        assert "Turn on Cursor" in message
+        assert "not the VoiceFlow.app entries" in message
+
+    def test_macos_permission_message_mentions_restart_for_packaged_app(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+        message = _macos_permission_message("input_monitoring")
+
+        assert "quit and reopen VoiceFlow" in message

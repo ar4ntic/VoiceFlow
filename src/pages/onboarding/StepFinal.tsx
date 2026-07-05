@@ -1,19 +1,9 @@
 import { Keyboard, Sparkles } from "lucide-react";
+import { formatHotkeyKeyForDisplay } from "@/lib/utils";
 
 // ============================================================================
 // STEP: FINAL
 // ============================================================================
-
-// The default hold hotkey is `ctrl+win` on every platform (see settings.py),
-// but the Super key is labelled differently per OS — show the right one.
-const platform =
-  (navigator as unknown as { userAgentData?: { platform: string } }).userAgentData
-    ?.platform ?? navigator.userAgent;
-const superKeyLabel = /Mac/i.test(platform)
-  ? "⌘"
-  : /Linux/i.test(platform)
-    ? "Super"
-    : "Win";
 
 export const StepFinal = () => (
   <div className="space-y-5 max-w-lg w-full">
@@ -25,11 +15,11 @@ export const StepFinal = () => (
         </p>
         <div className="flex items-center justify-center gap-3 pt-1">
           <kbd className="min-w-[72px] py-2.5 rounded-md bg-secondary border border-border text-base font-mono font-medium text-cream">
-            Ctrl
+            {formatHotkeyKeyForDisplay("ctrl")}
           </kbd>
           <span className="text-base text-cream-muted/40 font-mono">+</span>
           <kbd className="min-w-[72px] py-2.5 rounded-md bg-secondary border border-border text-base font-mono font-medium text-cream">
-            {superKeyLabel}
+            {formatHotkeyKeyForDisplay("win")}
           </kbd>
         </div>
         <p className="text-sm text-cream-muted">

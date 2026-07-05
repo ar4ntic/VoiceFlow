@@ -179,6 +179,10 @@ def open_privacy_settings(pane: PrivacyPane) -> bool:
     if not url:
         return False
     try:
+        if pane == "accessibility":
+            request_accessibility_permission()
+        elif pane == "input_monitoring":
+            request_input_monitoring_permission()
         subprocess.Popen(["open", url])
         return True
     except Exception as exc:

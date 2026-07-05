@@ -9,13 +9,13 @@ import { ModelRecoveryModal } from "@/components/ModelRecoveryModal";
 import type { Settings } from "@/lib/types";
 import { useBackendEvent } from "@/hooks/useBackendEvent";
 import { toast } from "sonner";
+import { isLinuxPlatform } from "@/lib/utils";
 
 // Detect Linux platform and add reduced-effects class
 // Qt WebEngine on Linux often falls back to software rendering,
 // making backdrop-filter/blur extremely expensive
 // Skip for popup route - it needs transparent background
-const isLinux =
-  ((navigator as unknown as { userAgentData?: { platform: string } }).userAgentData?.platform ?? navigator.userAgent).includes("Linux");
+const isLinux = isLinuxPlatform();
 if (isLinux && window.location.hash !== "#/popup") {
   document.documentElement.classList.add("reduced-effects");
 }

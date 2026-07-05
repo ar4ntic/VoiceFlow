@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, Zap, Cpu, Download } from "lucide-react";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, isMacPlatform } from "@/lib/utils";
 import type { GpuInfo } from "@/lib/types";
 
 // ============================================================================
@@ -44,10 +44,7 @@ const DEVICE_OPTIONS = [
   },
 ];
 
-const IS_MAC =
-  ((navigator as unknown as { userAgentData?: { platform: string } }).userAgentData?.platform ??
-    navigator.platform ??
-    navigator.userAgent).includes("Mac");
+const IS_MAC = isMacPlatform();
 
 export const StepHardware = ({
   device,

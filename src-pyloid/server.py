@@ -296,10 +296,10 @@ async def get_recording_state():
 
 
 @server.method()
-async def get_hotkey_status():
+async def get_hotkey_status(prompt: bool = False):
     """Return hotkey availability status (e.g. evdev permission errors)."""
     controller = get_controller()
-    return controller.hotkey_service.get_status()
+    return controller.hotkey_service.get_status(prompt=prompt)
 
 
 @server.method()

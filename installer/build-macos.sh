@@ -62,6 +62,7 @@ set_plist_string "CFBundleVersion" "$VERSION"
 set_plist_string "LSMinimumSystemVersion" "$MIN_MACOS"
 set_plist_string "NSMicrophoneUsageDescription" "VoiceFlow needs microphone access to record dictation and meetings."
 set_plist_string "NSScreenCaptureUsageDescription" "VoiceFlow needs Screen Recording permission to capture system audio for Meeting Mode."
+set_plist_string "NSInputMonitoringUsageDescription" "VoiceFlow needs Input Monitoring permission to listen for global hotkeys."
 
 EXECUTABLE="$("$PLISTBUDDY" -c "Print :CFBundleExecutable" "$PLIST")"
 BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE"

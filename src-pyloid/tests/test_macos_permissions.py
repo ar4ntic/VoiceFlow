@@ -80,3 +80,51 @@ def test_permission_snapshot_is_unknown_off_macos(monkeypatch):
         "screenRecording": "unknown",
         "accessibility": "unknown",
     }
+
+
+def test_open_accessibility_settings_requests_permission_first(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls = []
+    opened = []
+
+    monkeypatch.setattr(
+        macos_permissions,
+        "request_accessibility_permission",
+        lambda: calls.append("accessibility") or "denied",
+    )
+    monkeypatch.setattr(
+        macos_permissions.subprocess,
+        "Popen",
+        lambda args: opened.append(args),
+    )
+
+    assert macos_permissions.open_privacy_settings("accessibility") is True
+    assert calls == ["accessibility"]
+    assert opened == [[
+        "open",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    ]]
+
+
+def test_open_screen_recording_settings_does_not_request_hotkey_permission(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls = []
+    opened = []
+
+    monkeypatch.setattr(
+        macos_permissions,
+        "request_accessibility_permission",
+        lambda: calls.append("accessibility") or "denied",
+    )
+    monkeypatch.setattr(
+        macos_permissions.subprocess,
+        "Popen",
+        lambda args: opened.append(args),
+    )
+
+    assert macos_permissions.open_privacy_settings("screen_recording") is True
+    assert calls == []
+    assert opened == [[
+        "open",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    ]]

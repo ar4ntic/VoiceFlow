@@ -43,6 +43,7 @@ Releases = "https://github.com/infiniV/VoiceFlow/releases"
 dev = [
     "pyloid-builder",
     "pyloid-watcher",
+    "pillow",
     "ruff",
     "pytest",
 ]
